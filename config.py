@@ -35,6 +35,7 @@ LOCAL_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"       # 中文小模型, ~100MB
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
+SKILLS_DIR = os.path.join(DATA_DIR, "skills")
 
 # ---- Memory 配置 ----
 MEMORY_TOKEN_LIMIT = 30000
