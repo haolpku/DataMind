@@ -6,3 +6,6 @@ llama-index-readers-file
 chromadb
 python-dotenv
 sqlalchemy
+fastapi
+uvicorn[standard]
+python-multipart

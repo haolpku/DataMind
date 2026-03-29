@@ -1,4 +1,4 @@
-# RAG All-in-One
+# DataMind
 
 基于 LlamaIndex 的一体化智能助手，集成五大模块：
 
@@ -10,13 +10,18 @@
 
 Agent 会根据用户问题**自动选择**使用哪个工具，无需手动指定。
 
+支持两种使用方式：**Web 界面**（带可视化管理面板）和**终端命令行**。
+
+> 数据预处理人员请参阅 **[data.md](data.md)** — 说明各模块的数据格式规范和一键导入方式。
+
 ---
 
 ## 快速开始
 
 ```bash
-# 1. 激活环境
-conda activate rag-allinone
+# 1. 创建并激活环境
+conda create -n datamind python=3.12
+conda activate datamind
 
 # 2. 安装依赖
 pip install -r requirements.txt
@@ -24,10 +29,36 @@ pip install -r requirements.txt
 # 3. 编辑 config.py，填入你的 API Key 和 API Base
 
 # 4. 将文档放入 data/ 目录
+```
 
-# 5. 运行
+### 方式一：Web 界面（推荐）
+
+```bash
+python server.py
+```
+
+打开浏览器访问 **http://localhost:8000**
+
+Web 界面功能：
+- 左侧：流式对话（逐字输出）
+- 右侧面板（点击顶部 Tab 切换）：
+  - **Skills** — 查看所有已加载的技能工具及描述
+  - **Memory** — 查看对话记忆内容、一键清空记忆
+  - **RAG** — 查看/上传/删除知识库文档、重建向量索引
+  - **GraphRAG** — 查看知识图谱的实体和关系、重建图谱
+  - **Database** — 查看数据库表结构和数据
+
+前端是纯 HTML + CSS + JS（`static/index.html`），不需要 Node.js 或 npm，由 FastAPI 直接提供服务。
+
+### 方式二：终端命令行
+
+```bash
 python main.py
 ```
+
+在终端中直接交互式对话，功能与 Web 界面完全一致，适合无图形界面的服务器环境。
+
+---
 
 首次运行会自动构建向量索引和知识图谱（需要调用 API），后续启动会直接加载已有索引。
 
@@ -36,10 +67,13 @@ python main.py
 ## 项目结构
 
 ```
-rag-allinone/
+DataMind/
 ├── config.py              # API 配置 (LLM / Embedding / 路径 / Memory 参数)
-├── main.py                # 入口: 初始化所有模块 + 交互式对话
+├── server.py              # Web 入口: FastAPI 后端 + 前端页面
+├── main.py                # 终端入口: 交互式命令行对话
 ├── requirements.txt       # Python 依赖
+├── static/
+│   └── index.html         # 前端页面 (纯 HTML/CSS/JS, 无需 npm)
 ├── rag/
 │   ├── indexer.py         # RAG: 文档加载 + Chroma 向量索引
 │   ├── retriever.py       # RAG: 检索引擎
@@ -50,9 +84,6 @@ rag-allinone/
 │   └── agent.py           # Agent: 整合所有工具的 FunctionAgent
 ├── data/                  # 放入你的文档 (PDF/TXT/MD/DOCX)
 └── storage/               # 自动生成: 索引/图谱/数据库持久化
-    ├── chroma.sqlite3      # Chroma 向量索引
-    ├── graph/              # GraphRAG 图谱数据
-    └── demo.db             # SQLite 示例数据库
 ```
 
 ---
@@ -67,7 +98,11 @@ PDF, TXT, Markdown, DOCX, CSV, HTML, JSON, EPUB 等（LlamaIndex SimpleDirectory
 
 ### 操作步骤
 
-1. **添加文档**: 将你的文件放入 `data/` 目录（支持子目录递归扫描）
+**通过 Web 界面**：点击 RAG 面板 → 上传文档 → 点击"重建索引"
+
+**通过命令行**：
+
+1. 将文件放入 `data/` 目录（支持子目录递归扫描）
 
 ```
 data/
@@ -78,14 +113,12 @@ data/
 └── FAQ.docx
 ```
 
-2. **重建索引**: 删除 `storage/` 目录，重新运行 `python main.py`
+2. 删除 `storage/` 目录，重新运行
 
 ```bash
 rm -rf storage/
-python main.py
+python main.py   # 或 python server.py
 ```
-
-程序会自动重新构建向量索引和知识图谱。
 
 ### 调整分块参数
 
@@ -125,11 +158,11 @@ GraphRAG 从同一个 `data/` 目录读取文档，用 LLM 自动抽取实体和
 | 强项 | 单跳事实查找 | 多跳推理、关系理解 |
 | 数据存储 | 向量数据库 (Chroma) | 属性图 (NetworkX) |
 
-### 工作原理
+### 操作步骤
 
-1. LLM 读取每个文档块，抽取 `(实体A) -[关系]-> (实体B)` 三元组
-2. 所有三元组存入 PropertyGraph
-3. 查询时通过关键词/向量找到相关实体，沿关系边遍历
+**通过 Web 界面**：点击 GraphRAG 面板 → 查看实体和关系 → 点击"重建图谱"
+
+**通过命令行**：删除 `storage/graph/` 目录后重新运行即可。
 
 ### 调整图抽取参数
 
@@ -191,6 +224,8 @@ Database 模块使用 SQLite + SQLAlchemy，支持自然语言转 SQL 查询。
 | budget | FLOAT | 预算 |
 | status | VARCHAR(20) | 状态 |
 
+**通过 Web 界面**：点击 Database 面板 → 查看表结构 → 点击"查看数据"展示表内容
+
 ### 替换为你自己的数据库
 
 编辑 `rag/database.py`，修改 `init_demo_database()` 函数：
@@ -198,7 +233,6 @@ Database 模块使用 SQLite + SQLAlchemy，支持自然语言转 SQL 查询。
 **方式 1: 修改表结构和数据**
 
 ```python
-# 定义你自己的表
 products = Table(
     "products", metadata,
     Column("id", Integer, primary_key=True),
@@ -207,7 +241,6 @@ products = Table(
     Column("category", String(50)),
 )
 
-# 插入你的数据
 conn.execute(products.insert(), [
     {"id": 1, "name": "笔记本电脑", "price": 6999, "category": "电子产品"},
     # ...
@@ -260,6 +293,8 @@ Skills 是最灵活的扩展方式 — 任何 Python 函数都可以变成 Agent
 | 文本分析 | `analyze_text` | 统计字数、行数、段落数 |
 | 单位换算 | `unit_convert` | 长度、重量、温度换算 |
 
+**通过 Web 界面**：点击 Skills 面板即可查看所有已注册的技能和描述
+
 ### 添加新 Skill 的步骤
 
 编辑 `rag/skills.py`：
@@ -272,7 +307,6 @@ def my_new_skill(param1: str, param2: int = 10) -> str:
     param1: 参数1的说明
     param2: 参数2的说明，默认值为10
     """
-    # 你的逻辑
     result = do_something(param1, param2)
     return f"结果: {result}"
 ```
@@ -296,7 +330,7 @@ def get_all_skills() -> list:
     ]
 ```
 
-不需要改其他文件，重启 `python main.py` 即可生效。
+不需要改其他文件，重启 `python server.py` 或 `python main.py` 即可生效。
 
 ### 实用 Skill 示例
 
@@ -347,8 +381,6 @@ def run_python_code(code: str) -> str:
 
 ### Agent 如何决定调用哪个工具？
 
-Agent 的决策流程：
-
 1. 收到用户问题
 2. 读取所有工具的 `description`（即函数的 docstring）
 3. LLM 判断哪个工具的描述最匹配用户意图
@@ -365,6 +397,8 @@ Agent 的决策流程：
 ## Memory 是怎么工作的
 
 Memory 模块提供对话记忆能力，让 Agent 能理解多轮对话的上下文。
+
+**通过 Web 界面**：点击 Memory 面板 → 查看当前所有对话记忆 → 可一键清空
 
 ### 工作原理
 
@@ -429,7 +463,7 @@ Agent 回答 → 回答也存入短期记忆
 程序退出 → 当前实现中记忆随程序结束而清空
 ```
 
-注意：当前版本的 Memory **不会跨 session 持久化**。每次重启 `python main.py` 记忆会重新开始。如需跨 session 的持久化记忆，可以集成 Mem0 或 Zep。
+注意：当前版本的 Memory **不会跨 session 持久化**。每次重启程序记忆会重新开始。如需跨 session 的持久化记忆，可以集成 Mem0 或 Zep。
 
 ### 多 Session 支持
 
@@ -478,15 +512,19 @@ CHAT_HISTORY_TOKEN_RATIO = 0.7                    # 短期记忆占比
 | 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
 | 硅基流动 | `https://api.siliconflow.cn/v1` | `deepseek-ai/DeepSeek-V3` |
 
+不需要 GPU，所有 LLM 推理和 Embedding 生成都通过 API 远程完成。
+
 ---
 
 ## 重建索引
 
-如果你更新了 `data/` 目录的文档，需要重建索引：
+**通过 Web 界面**：在 RAG 或 GraphRAG 面板中点击"重建索引"/"重建图谱"按钮。
+
+**通过命令行**：
 
 ```bash
 rm -rf storage/
-python main.py
+python main.py   # 或 python server.py
 ```
 
 这会重建向量索引、知识图谱，并重新创建示例数据库。
@@ -503,3 +541,5 @@ python main.py
 | 知识图谱 | NetworkX | 本地, 纯 Python |
 | 关系数据库 | SQLite | 零配置 |
 | Agent | FunctionAgent | 自动工具选择 |
+| Web 后端 | FastAPI | 异步, SSE 流式输出 |
+| Web 前端 | 纯 HTML/CSS/JS | 无需 npm, 零前端依赖 |
