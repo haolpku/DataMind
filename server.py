@@ -29,18 +29,31 @@ from llama_index.core import Settings
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
 
-from rag.indexer import get_or_create_index, load_documents, load_pre_chunked, build_index
-from rag.graph_rag import get_or_create_graph_index, build_graph_index
-from rag.database import init_demo_database, create_sql_query_engine, DB_PATH
-from rag.skills import get_all_skills
-from rag.agent import create_agent
-from rag.memory import create_memory
+from modules.rag.indexer import get_or_create_index, load_documents, load_pre_chunked, build_index
+from modules.graphrag.graph_rag import get_or_create_graph_index, build_graph_index
+from modules.database.database import init_demo_database, create_sql_query_engine, DB_PATH
+from modules.skills.tools import get_all_skills
+from modules.skills.knowledge import get_or_create_skill_index, build_skill_index, load_skill_documents
+from modules.agent.agent import create_agent
+from modules.memory.memory import create_memory
 
 import chromadb
 from sqlalchemy import create_engine, text, inspect
 
 
 app_state = {}
+
+
+def _recreate_agent():
+    """Helper to recreate agent with current state"""
+    return create_agent(
+        vector_index=app_state.get("vector_index"),
+        graph_index=app_state.get("graph_index"),
+        sql_query_engine=app_state.get("sql_query_engine"),
+        skill_index=app_state.get("skill_index"),
+        extra_tools=app_state.get("skills", []),
+        llm=app_state["llm"],
+    )
 
 
 @asynccontextmanager
@@ -77,13 +90,14 @@ async def lifespan(app: FastAPI):
         app_state["sql_query_engine"] = None
 
     app_state["skills"] = get_all_skills()
-    app_state["agent"] = create_agent(
-        vector_index=app_state["vector_index"],
-        graph_index=app_state["graph_index"],
-        sql_query_engine=app_state["sql_query_engine"],
-        extra_tools=app_state["skills"],
-        llm=llm,
-    )
+
+    try:
+        app_state["skill_index"] = get_or_create_skill_index()
+    except Exception as e:
+        print(f"[WARNING] 知识型 Skills 初始化失败: {e}")
+        app_state["skill_index"] = None
+
+    app_state["agent"] = _recreate_agent()
     app_state["memory"] = create_memory()
 
     print("[INFO] DataMind 初始化完成")
@@ -130,7 +144,7 @@ async def chat(req: ChatRequest):
 
 
 # ============================================================
-# Skills API
+# Skills API (工具型)
 # ============================================================
 @app.get("/api/skills")
 async def list_skills():
@@ -144,6 +158,74 @@ async def list_skills():
             "parameters": str(meta.fn_schema.schema()) if meta.fn_schema else "",
         })
     return {"skills": result, "count": len(result)}
+
+
+# ============================================================
+# Skills API (知识型)
+# ============================================================
+@app.get("/api/skills/knowledge")
+async def list_knowledge_skills():
+    skills_dir = config.SKILLS_DIR
+    files = []
+    if os.path.exists(skills_dir):
+        for f in os.listdir(skills_dir):
+            if f.endswith(".md") and not f.startswith("."):
+                filepath = os.path.join(skills_dir, f)
+                size = os.path.getsize(filepath)
+                with open(filepath, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+                first_line = content.split("\n")[0].strip().lstrip("# ") if content else ""
+                files.append({"name": f, "size": size, "title": first_line})
+
+    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    try:
+        collection = chroma_client.get_or_create_collection("skills_knowledge")
+        vector_count = collection.count()
+    except Exception:
+        vector_count = 0
+
+    return {"files": files, "count": len(files), "vector_count": vector_count}
+
+
+@app.post("/api/skills/knowledge/upload")
+async def upload_knowledge_skill(file: UploadFile = File(...)):
+    if not file.filename.endswith(".md"):
+        raise HTTPException(400, "只支持 .md 格式的技能文件")
+    os.makedirs(config.SKILLS_DIR, exist_ok=True)
+    filepath = os.path.join(config.SKILLS_DIR, file.filename)
+    content = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(content)
+    return {"status": "ok", "filename": file.filename, "size": len(content)}
+
+
+@app.delete("/api/skills/knowledge/{filename}")
+async def delete_knowledge_skill(filename: str):
+    filepath = os.path.join(config.SKILLS_DIR, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(404, "文件不存在")
+    os.remove(filepath)
+    return {"status": "ok", "message": f"已删除 {filename}"}
+
+
+@app.post("/api/skills/knowledge/rebuild")
+async def rebuild_knowledge_skills():
+    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    try:
+        chroma_client.delete_collection("skills_knowledge")
+    except Exception:
+        pass
+
+    docs = load_skill_documents()
+    if not docs:
+        app_state["skill_index"] = None
+        app_state["agent"] = _recreate_agent()
+        return {"status": "ok", "message": "无技能文件，已清空索引"}
+
+    skill_index = build_skill_index(documents=docs)
+    app_state["skill_index"] = skill_index
+    app_state["agent"] = _recreate_agent()
+    return {"status": "ok", "message": f"技能知识索引重建完成 ({len(docs)} 个文档)"}
 
 
 # ============================================================
@@ -180,7 +262,12 @@ async def clear_memory():
 async def list_documents():
     files = []
     if os.path.exists(config.DATA_DIR):
+        exclude_dirs = {"chunks", "triplets", "skills"}
         for root, dirs, filenames in os.walk(config.DATA_DIR):
+            rel_root = os.path.relpath(root, config.DATA_DIR)
+            top_dir = rel_root.split(os.sep)[0] if rel_root != "." else ""
+            if top_dir in exclude_dirs:
+                continue
             for f in filenames:
                 filepath = os.path.join(root, f)
                 relpath = os.path.relpath(filepath, config.DATA_DIR)
@@ -233,13 +320,7 @@ async def rebuild_rag_index():
         mode = "文档分块"
 
     app_state["vector_index"] = index
-    app_state["agent"] = create_agent(
-        vector_index=index,
-        graph_index=app_state.get("graph_index"),
-        sql_query_engine=app_state.get("sql_query_engine"),
-        extra_tools=app_state.get("skills", []),
-        llm=app_state["llm"],
-    )
+    app_state["agent"] = _recreate_agent()
     return {"status": "ok", "message": f"RAG 索引重建完成 (模式: {mode})"}
 
 
@@ -280,18 +361,12 @@ async def graphrag_status():
 async def rebuild_graph_index():
     try:
         import shutil
-        from rag.graph_rag import GRAPH_STORAGE_DIR
+        from modules.graphrag.graph_rag import GRAPH_STORAGE_DIR
         if os.path.exists(GRAPH_STORAGE_DIR):
             shutil.rmtree(GRAPH_STORAGE_DIR)
         graph_index = build_graph_index()
         app_state["graph_index"] = graph_index
-        app_state["agent"] = create_agent(
-            vector_index=app_state.get("vector_index"),
-            graph_index=graph_index,
-            sql_query_engine=app_state.get("sql_query_engine"),
-            extra_tools=app_state.get("skills", []),
-            llm=app_state["llm"],
-        )
+        app_state["agent"] = _recreate_agent()
         return {"status": "ok", "message": "GraphRAG 重建完成"}
     except Exception as e:
         raise HTTPException(500, str(e))

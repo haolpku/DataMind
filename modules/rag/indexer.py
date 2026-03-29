@@ -26,12 +26,12 @@ PRE_CHUNKED_DIR = os.path.join(config.DATA_DIR, "chunks")
 
 def load_documents(data_dir: str = config.DATA_DIR):
     """从 data/ 目录加载所有文档 (支持 PDF, TXT, MD, DOCX 等)
-    自动排除 chunks/ 和 triplets/ 子目录"""
+    自动排除 chunks/, triplets/, skills/ 子目录"""
     if not os.path.exists(data_dir):
         print(f"[WARNING] data 目录不存在: {data_dir}")
         return []
 
-    exclude_dirs = {"chunks", "triplets"}
+    exclude_dirs = {"chunks", "triplets", "skills"}
     files = []
     for item in os.listdir(data_dir):
         if item in exclude_dirs or item.startswith("."):

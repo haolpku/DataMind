@@ -5,7 +5,8 @@ FunctionAgent 根据用户问题自动选择工具:
 - 文档检索 -> knowledge_search (向量 RAG)
 - 关系/多跳推理 -> graph_search (GraphRAG)
 - 数据查询 -> database_query (NL2SQL)
-- 自定义技能 -> calculator, get_current_time, ... (Skills)
+- 技能知识检索 -> skill_search (知识型 Skill)
+- 自定义技能 -> calculator, get_current_time, ... (工具型 Skills)
 - 普通聊天 -> 直接用 LLM 回答
 """
 
@@ -13,7 +14,7 @@ from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.tools import QueryEngineTool
 from llama_index.core import VectorStoreIndex
 
-from rag.retriever import create_query_engine
+from modules.rag.retriever import create_query_engine
 
 
 SYSTEM_PROMPT = """\
@@ -23,6 +24,7 @@ SYSTEM_PROMPT = """\
 - knowledge_search: 语义检索知识库文档，查找文档中的具体内容
 - graph_search: 知识图谱检索，理解实体间关系，多跳推理
 - database_query: 数据库查询，统计、排序、筛选结构化数据
+- skill_search: 检索技能知识库，查找操作流程、SOP、领域专业指南
 
 实用技能工具:
 - get_current_time: 获取当前日期和时间
@@ -32,6 +34,7 @@ SYSTEM_PROMPT = """\
 
 核心规则:
 - 根据问题类型选择合适的工具，可以组合使用多个工具
+- 涉及操作流程、最佳实践、SOP 时优先用 skill_search
 - 需要精确计算时用 calculator (不要自己算)
 - 涉及时间日期用 get_current_time
 - 只有明确的闲聊才不需要使用工具
@@ -43,6 +46,7 @@ def create_agent(
     vector_index: VectorStoreIndex = None,
     graph_index=None,
     sql_query_engine=None,
+    skill_index=None,
     extra_tools: list = None,
     llm=None,
 ):
@@ -52,7 +56,8 @@ def create_agent(
         vector_index: 向量索引 (RAG)
         graph_index: 图谱索引 (GraphRAG)
         sql_query_engine: SQL 查询引擎 (Database)
-        extra_tools: 额外的自定义工具列表 (Skills)
+        skill_index: 技能知识索引 (Knowledge Skills)
+        extra_tools: 额外的自定义工具列表 (Tool Skills)
         llm: LLM 实例
     """
     tools = []
@@ -70,7 +75,7 @@ def create_agent(
         tools.append(rag_tool)
 
     if graph_index is not None:
-        from rag.graph_rag import create_graph_query_engine
+        from modules.graphrag.graph_rag import create_graph_query_engine
         graph_engine = create_graph_query_engine(graph_index)
         graph_tool = QueryEngineTool.from_defaults(
             query_engine=graph_engine,
@@ -94,6 +99,19 @@ def create_agent(
             ),
         )
         tools.append(db_tool)
+
+    if skill_index is not None:
+        from modules.skills.knowledge import create_skill_query_engine
+        skill_engine = create_skill_query_engine(skill_index)
+        skill_tool = QueryEngineTool.from_defaults(
+            query_engine=skill_engine,
+            name="skill_search",
+            description=(
+                "检索技能知识库。当用户问题涉及操作流程、SOP、最佳实践、"
+                "领域专业知识、使用指南时使用。输入为用户的问题。"
+            ),
+        )
+        tools.append(skill_tool)
 
     if extra_tools:
         tools.extend(extra_tools)

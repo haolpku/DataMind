@@ -1,10 +1,11 @@
 """
-RAG All-in-One 入口
+DataMind 入口 (命令行模式)
 
 功能:
   - RAG 向量检索 (Chroma)
   - GraphRAG 知识图谱检索 (NetworkX)
   - Database 自然语言查询 (SQLite NL2SQL)
+  - Knowledge Skills 技能知识检索
   - 对话记忆 (短期+长期)
 
 用法:
@@ -25,12 +26,13 @@ from llama_index.core import Settings
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
 
-from rag.indexer import get_or_create_index
-from rag.graph_rag import get_or_create_graph_index
-from rag.database import init_demo_database, create_sql_query_engine
-from rag.skills import get_all_skills
-from rag.agent import create_agent
-from rag.memory import create_memory
+from modules.rag.indexer import get_or_create_index
+from modules.graphrag.graph_rag import get_or_create_graph_index
+from modules.database.database import init_demo_database, create_sql_query_engine
+from modules.skills.tools import get_all_skills
+from modules.skills.knowledge import get_or_create_skill_index
+from modules.agent.agent import create_agent
+from modules.memory.memory import create_memory
 
 
 def init_settings():
@@ -63,7 +65,7 @@ def init_settings():
 async def chat_loop(agent, memory):
     """交互式对话循环"""
     print("\n" + "=" * 60)
-    print("  RAG All-in-One 智能助手")
+    print("  DataMind 智能助手")
     print("  工具: RAG | GraphRAG | Database | Skills")
     print("-" * 60)
     print("  输入问题开始对话")
@@ -123,22 +125,31 @@ def main():
         print(f"[WARNING] Database 初始化失败: {e}")
         sql_query_engine = None
 
-    # 4. Skills
-    print("\n[INFO] === 加载 Skills ===")
+    # 4. Skills (工具型)
+    print("\n[INFO] === 加载工具型 Skills ===")
     skills = get_all_skills()
-    print(f"[Skills] 已加载 {len(skills)} 个技能工具")
+    print(f"[Skills] 已加载 {len(skills)} 个工具型技能")
 
-    # 5. 创建 Agent (整合所有工具)
+    # 5. Skills (知识型)
+    print("\n[INFO] === 加载知识型 Skills ===")
+    try:
+        skill_index = get_or_create_skill_index()
+    except Exception as e:
+        print(f"[WARNING] 知识型 Skills 初始化失败: {e}")
+        skill_index = None
+
+    # 6. 创建 Agent (整合所有工具)
     print("\n[INFO] === 创建 Agent ===")
     agent = create_agent(
         vector_index=vector_index,
         graph_index=graph_index,
         sql_query_engine=sql_query_engine,
+        skill_index=skill_index,
         extra_tools=skills,
         llm=llm,
     )
 
-    # 6. Memory
+    # 7. Memory
     memory = create_memory()
 
     asyncio.run(chat_loop(agent, memory))

@@ -1,6 +1,6 @@
 # 数据预处理规范
 
-本文档面向**数据处理流水线的开发者**，说明如何将处理好的数据导入 DataMind 的三个数据模块。
+本文档面向**数据处理流水线的开发者**，说明如何将处理好的数据导入 DataMind 的四个数据模块。
 
 数据预处理（清洗、转换、标注等）应在上游的数据处理仓库中完成，处理后的输出按照以下规范组织，即可一键导入 DataMind。
 
@@ -18,10 +18,12 @@
     │
     ├── 预构建三元组 ─→ data/triplets/*.jsonl → GraphRAG 方式B (直接导入, 无 API 消耗)
     │
+    ├── 技能/SOP 文档 → data/skills/*.md ────→ Skills (知识型技能检索)
+    │
     └── 结构化数据 ──→ SQLite 文件 ───────────→ Database (NL2SQL 查询)
 ```
 
-三个模块的数据**相互独立**，可以只准备其中一个或多个。每个模块的两种方式也可以二选一。
+四个模块的数据**相互独立**，可以只准备其中一个或多个。每个模块的两种方式也可以二选一。
 
 ---
 
@@ -221,7 +223,7 @@ Database 模块使用 SQLite，接受两种输入方式。
 
 直接提供一个 `.db` 文件，放到 `storage/` 目录下。
 
-**文件路径**：`storage/demo.db`（或在 `rag/database.py` 中修改 `DB_PATH`）
+**文件路径**：`storage/demo.db`（或在 `modules/database/database.py` 中修改 `DB_PATH`）
 
 ```python
 # 上游数据处理脚本输出 SQLite 文件
@@ -292,7 +294,7 @@ conn.close()
 
 数据导入 SQLite 后，需要修改两个地方让 DataMind 识别你的表：
 
-**1. 修改 `rag/database.py`**：
+**1. 修改 `modules/database/database.py`**：
 
 ```python
 def create_sql_query_engine(engine=None):
@@ -310,7 +312,7 @@ def create_sql_query_engine(engine=None):
     return query_engine
 ```
 
-**2. 修改 `rag/agent.py` 中的工具描述**：
+**2. 修改 `modules/agent/agent.py` 中的工具描述**：
 
 ```python
 db_tool = QueryEngineTool.from_defaults(
@@ -336,6 +338,79 @@ db_tool = QueryEngineTool.from_defaults(
 | str | TEXT | 名称、描述、类别 |
 | date/datetime | TEXT | 建议存为 `YYYY-MM-DD` 格式字符串 |
 | bool | INTEGER | 0 / 1 |
+
+---
+
+## 4. Skills 技能知识
+
+### 数据要求
+
+将操作指南、SOP、领域专业知识等 **Markdown 文件** 放入 `data/skills/` 目录。系统会自动索引，Agent 在遇到相关问题时会通过 `skill_search` 工具检索这些知识。
+
+与 RAG 知识库的区别：
+- **RAG 知识库** (`data/`): 通用文档，用于回答关于文档内容的问题
+- **Skills 知识库** (`data/skills/`): 操作流程、最佳实践、SOP，用于指导"怎么做"类问题
+
+### 文件格式
+
+标准 Markdown 文件，建议结构：
+
+```markdown
+# 技能/SOP 标题
+
+## 适用场景
+描述什么时候应该使用这个技能。
+
+## 操作步骤
+1. 第一步...
+2. 第二步...
+
+## 注意事项
+- 注意点 1
+- 注意点 2
+```
+
+### 目录结构示例
+
+```
+data/skills/
+├── 数据库运维SOP.md
+├── 代码审查指南.md
+├── 部署流程.md
+└── 故障排查手册.md
+```
+
+### 最佳实践
+
+- **一个文件 = 一个技能/流程**，不要把多个不相关的 SOP 放在一个文件中
+- **标题清晰**：第一行 `# 标题` 会在前端展示为技能名称
+- **包含适用场景**：帮助 Agent 判断何时检索这个技能
+- 文件名使用有意义的中文或英文命名
+
+### 导入方式
+
+将 `.md` 文件放入 `data/skills/` 目录后：
+- Web 界面：Skills 面板 → 点击"重建索引"
+- 命令行：删除 `storage/` 后重启，系统会自动检测并构建索引
+
+### 数据处理流水线输出示例
+
+```python
+import os
+
+skills_dir = "/path/to/DataMind/data/skills"
+os.makedirs(skills_dir, exist_ok=True)
+
+skills = [
+    {"title": "数据库运维SOP", "content": "# 数据库运维 SOP\n\n## 适用场景\n..."},
+    {"title": "代码审查指南", "content": "# 代码审查指南\n\n## 审查流程\n..."},
+]
+
+for skill in skills:
+    filepath = os.path.join(skills_dir, f"{skill['title']}.md")
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(skill["content"])
+```
 
 ---
 
@@ -407,6 +482,22 @@ def export_graph_triplets(triplets: list[dict]):
     print(f"[Export] GraphRAG: 已导出 {len(triplets)} 条三元组")
 
 
+def export_skill_documents(skills: list[dict]):
+    """
+    导出 Skills 技能知识文档
+
+    Args:
+        skills: [{"title": "技能标题", "content": "Markdown 内容"}]
+    """
+    skills_dir = os.path.join(DATA_DIR, "skills")
+    os.makedirs(skills_dir, exist_ok=True)
+    for skill in skills:
+        filepath = os.path.join(skills_dir, f"{skill['title']}.md")
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(skill["content"])
+    print(f"[Export] Skills: 已导出 {len(skills)} 个技能文档到 {skills_dir}")
+
+
 def export_database_tables(tables: dict):
     """
     导出 Database 表数据
@@ -464,6 +555,11 @@ if __name__ == "__main__":
         {"subject": "LlamaIndex", "relation": "基于", "object": "Python"},
     ])
 
+    export_skill_documents([
+        {"title": "部署流程", "content": "# 部署流程\n\n## 适用场景\n..."},
+        {"title": "故障排查手册", "content": "# 故障排查手册\n\n## 排查步骤\n..."},
+    ])
+
     export_database_tables({
         "products": {
             "columns": {"id": "INTEGER PRIMARY KEY", "name": "TEXT", "price": "REAL"},
@@ -483,10 +579,12 @@ if __name__ == "__main__":
 |------|---------|---------|
 | RAG | 往 `data/` 新增文件后点击"重建索引" | 删除 `storage/` 后重启 |
 | GraphRAG | 当前仅支持全量重建 | 删除 `storage/graph/` 后重启 |
+| Skills | 往 `data/skills/` 新增 .md 文件后点击"重建索引" | 删除 skills_knowledge collection 后重启 |
 | Database | 直接修改 `storage/demo.db` 即时生效 | 删除 `.db` 文件后重启 |
 
 注意：
 - RAG 方式 A 和 GraphRAG 方式 A 重建需要调用 LLM API（Embedding / 实体抽取），大量文档时会消耗较多 token
 - RAG 方式 B（预分块）仅消耗 Embedding API token，不涉及 LLM 分块
 - GraphRAG 方式 B（预构建三元组）不消耗任何 API token，直接导入图数据库
+- Skills 知识索引仅消耗 Embedding API token
 - 建议在数据稳定后再执行重建

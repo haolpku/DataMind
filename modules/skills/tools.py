@@ -1,5 +1,5 @@
 """
-Skills 模块: 自定义工具/技能
+Skills 模块: 自定义工具/技能 (工具型)
 
 每个 Skill 就是一个 Python 函数，包装成 FunctionTool 后注册到 Agent。
 Agent 会根据用户问题自动决定是否调用。
@@ -14,22 +14,15 @@ Agent 会根据用户问题自动决定是否调用。
 
 import datetime
 import math
-import subprocess
 from llama_index.core.tools import FunctionTool
 
 
-# ============================================================
-# Skill 1: 获取当前时间
-# ============================================================
 def get_current_time() -> str:
     """获取当前日期和时间。当用户问"现在几点"、"今天几号"、"当前日期"等时间相关问题时使用。"""
     now = datetime.datetime.now()
     return now.strftime("当前时间: %Y年%m月%d日 %H:%M:%S (星期%w)")
 
 
-# ============================================================
-# Skill 2: 数学计算器
-# ============================================================
 def calculator(expression: str) -> str:
     """安全的数学计算器。当用户需要精确的数学计算时使用，如加减乘除、幂运算、三角函数等。
     expression: 数学表达式，如 '2+3*4', 'sqrt(144)', 'sin(3.14/2)'
@@ -50,9 +43,6 @@ def calculator(expression: str) -> str:
         return f"计算错误: {e}"
 
 
-# ============================================================
-# Skill 3: 文本分析
-# ============================================================
 def analyze_text(text: str) -> str:
     """分析一段文本的基本统计信息。当用户需要统计字数、段落数等文本特征时使用。
     text: 要分析的文本内容
@@ -76,9 +66,6 @@ def analyze_text(text: str) -> str:
     )
 
 
-# ============================================================
-# Skill 4: 单位换算
-# ============================================================
 def unit_convert(value: float, from_unit: str, to_unit: str) -> str:
     """单位换算工具。支持长度、重量、温度的常见换算。
     value: 数值
@@ -117,11 +104,8 @@ def unit_convert(value: float, from_unit: str, to_unit: str) -> str:
     return f"不支持的换算: {from_unit} -> {to_unit}"
 
 
-# ============================================================
-# 注册所有 Skills
-# ============================================================
 def get_all_skills() -> list:
-    """返回所有可用的 Skill 工具列表"""
+    """返回所有可用的工具型 Skill 列表"""
     return [
         FunctionTool.from_defaults(fn=get_current_time),
         FunctionTool.from_defaults(fn=calculator),

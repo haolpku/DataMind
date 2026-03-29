@@ -175,14 +175,60 @@ async function loadPanel(tab) {
 
 // Skills panel
 async function loadSkills(panel) {
-  const res = await fetch('/api/skills');
-  const data = await res.json();
-  let html = `<div class="card"><h3>可用技能 <span class="badge green">${data.count}</span></h3>`;
-  data.skills.forEach(s => {
-    html += `<div class="skill-item"><div class="skill-name">${s.name}</div><div class="skill-desc">${s.description}</div></div>`;
+  const [toolRes, knowledgeRes] = await Promise.all([
+    fetch('/api/skills'),
+    fetch('/api/skills/knowledge'),
+  ]);
+  const toolData = await toolRes.json();
+  const knowledgeData = await knowledgeRes.json();
+
+  let html = '';
+
+  // Knowledge Skills
+  html += `<div class="card"><h3>知识型技能 <span class="badge green">${knowledgeData.count} 个文件 / ${knowledgeData.vector_count} 条向量</span></h3>`;
+  html += '<div class="action-bar"><button class="action-btn" onclick="rebuildKnowledgeSkills()">重建索引</button><button class="action-btn" onclick="loadPanel(\'skills\')">刷新</button></div>';
+  html += '<div class="upload-zone" onclick="document.getElementById(\'skillFileInput\').click()">点击上传技能文件 (.md)<input type="file" id="skillFileInput" accept=".md" onchange="uploadSkillFile(this)" multiple></div>';
+  knowledgeData.files.forEach(f => {
+    const size = f.size < 1024 ? f.size + ' B' : (f.size / 1024).toFixed(1) + ' KB';
+    html += `<div class="file-item"><div><div class="file-name">${escapeHtml(f.name)}</div><div class="file-size">${escapeHtml(f.title)} | ${size}</div></div><button class="file-del" onclick="deleteSkillFile('${f.name}')">删除</button></div>`;
+  });
+  if (knowledgeData.files.length === 0) html += '<p style="color:var(--text2);font-size:13px">暂无技能文件，请上传 .md 格式的操作指南/SOP</p>';
+  html += '</div>';
+
+  // Tool Skills
+  html += `<div class="card"><h3>工具型技能 <span class="badge green">${toolData.count}</span></h3>`;
+  toolData.skills.forEach(s => {
+    html += `<div class="skill-item"><div class="skill-name">${escapeHtml(s.name)}</div><div class="skill-desc">${escapeHtml(s.description)}</div></div>`;
   });
   html += '</div>';
+
   panel.innerHTML = html;
+}
+
+async function uploadSkillFile(input) {
+  for (const file of input.files) {
+    const formData = new FormData();
+    formData.append('file', file);
+    await fetch('/api/skills/knowledge/upload', { method: 'POST', body: formData });
+  }
+  input.value = '';
+  loadPanel('skills');
+}
+
+async function deleteSkillFile(name) {
+  await fetch(`/api/skills/knowledge/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  loadPanel('skills');
+}
+
+async function rebuildKnowledgeSkills() {
+  const panel = document.getElementById('panelContent');
+  panel.innerHTML = '<div class="loading"><span class="dot-pulse"></span> 正在重建技能知识索引...</div>';
+  try {
+    await fetch('/api/skills/knowledge/rebuild', { method: 'POST' });
+    loadPanel('skills');
+  } catch (e) {
+    panel.innerHTML = `<div class="card"><h3>错误</h3><p style="color:var(--red)">${e.message}</p></div>`;
+  }
 }
 
 // Memory panel
