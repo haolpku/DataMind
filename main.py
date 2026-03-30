@@ -9,7 +9,7 @@ DataMind 入口 (命令行模式)
   - 对话记忆 (短期+长期)
 
 用法:
-  1. 将文档放入 data/ 目录
+  1. 将文档放入 data/profiles/default/ 目录
   2. 复制 .env.example 为 .env 并填入你的 API Key
   3. pip install -r requirements.txt
   4. python main.py
@@ -51,7 +51,8 @@ async def chat_loop(agent, memory):
             break
 
         if user_input.lower() == "rebuild":
-            print("[INFO] 请删除 storage/ 目录后重启程序以重建所有索引")
+            from config import settings
+            print(f"[INFO] 请删除 storage/{settings.data_profile}/ 目录后重启程序以重建索引")
             continue
 
         try:

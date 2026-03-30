@@ -2,8 +2,8 @@
 GraphRAG 模块: 基于知识图谱的检索
 
 支持两种输入:
-  方式 A: 原始文档 (data/) -> SimpleLLMPathExtractor 自动抽取实体/关系 -> 构建图索引
-  方式 B: 预构建三元组 JSONL (data/triplets/*.jsonl) -> 直接导入图数据库，不涉及 LLM 抽取
+  方式 A: 原始文档 (profile 目录) -> SimpleLLMPathExtractor 自动抽取实体/关系 -> 构建图索引
+  方式 B: 预构建三元组 JSONL (profile/triplets/*.jsonl) -> 直接导入图数据库，不涉及 LLM 抽取
 
 使用 PropertyGraphIndex + SimplePropertyGraphStore (NetworkX 后端)
 """
@@ -21,24 +21,25 @@ from llama_index.core.graph_stores import SimplePropertyGraphStore
 from llama_index.core.graph_stores.types import EntityNode, Relation
 
 from config import settings
-
-GRAPH_STORAGE_DIR = os.path.join(settings.storage_dir, "graph")
-TRIPLETS_DIR = os.path.join(settings.data_dir, "triplets")
+from schema.types import GraphTriple
 
 
-def load_triplets_from_file(triplets_dir: str = TRIPLETS_DIR):
-    """从 data/triplets/ 目录加载预构建的三元组 JSONL 文件
+def _graph_storage_dir() -> str:
+    return os.path.join(settings.storage_dir, "graph")
 
-    JSONL 格式 (每行一个 JSON):
-        {"subject": "实体A", "relation": "关系", "object": "实体B"}
 
-    可选字段:
-        {"subject": "实体A", "relation": "关系", "object": "实体B",
-         "subject_type": "Person", "object_type": "Organization"}
+def _triplets_dir() -> str:
+    return os.path.join(settings.data_dir, "triplets")
+
+
+def load_triplets_from_file(triplets_dir: str = None):
+    """从 profile/triplets/ 目录加载预构建的三元组 JSONL 文件，通过 GraphTriple schema 校验。
 
     Returns:
         (entities, relations): EntityNode 字典和 Relation 列表
     """
+    if triplets_dir is None:
+        triplets_dir = _triplets_dir()
     if not os.path.exists(triplets_dir):
         return {}, []
 
@@ -56,24 +57,33 @@ def load_triplets_from_file(triplets_dir: str = TRIPLETS_DIR):
                 if not line:
                     continue
                 try:
-                    item = json.loads(line)
+                    raw = json.loads(line)
                 except json.JSONDecodeError:
                     print(f"[WARNING] {filepath} 第 {line_num} 行 JSON 解析失败，跳过")
                     continue
 
-                subj = item.get("subject", "").strip()
-                rel = item.get("relation", "").strip()
-                obj = item.get("object", "").strip()
+                try:
+                    triple = GraphTriple.model_validate(raw)
+                except Exception as e:
+                    print(f"[WARNING] {filepath} 第 {line_num} 行 schema 校验失败: {e}，跳过")
+                    continue
+
+                subj = triple.subject.strip()
+                rel = triple.relation.strip()
+                obj = triple.object.strip()
                 if not subj or not rel or not obj:
                     continue
 
-                subj_type = item.get("subject_type", "entity")
-                obj_type = item.get("object_type", "entity")
-
                 if subj not in entities:
-                    entities[subj] = EntityNode(name=subj, label=subj_type)
+                    entities[subj] = EntityNode(
+                        name=subj, label=triple.subject_type,
+                        properties=triple.subject_properties or {},
+                    )
                 if obj not in entities:
-                    entities[obj] = EntityNode(name=obj, label=obj_type)
+                    entities[obj] = EntityNode(
+                        name=obj, label=triple.object_type,
+                        properties=triple.object_properties or {},
+                    )
 
                 relations.append(Relation(
                     source_id=entities[subj].id,
@@ -97,13 +107,14 @@ def build_graph_from_triplets(entities: dict, relations: list):
         embed_kg_nodes=False,
     )
 
-    os.makedirs(GRAPH_STORAGE_DIR, exist_ok=True)
-    index.storage_context.persist(persist_dir=GRAPH_STORAGE_DIR)
+    gdir = _graph_storage_dir()
+    os.makedirs(gdir, exist_ok=True)
+    index.storage_context.persist(persist_dir=gdir)
     print(f"[GraphRAG] 从三元组构建图索引完成 ({len(entities)} 实体, {len(relations)} 关系)")
 
     try:
         graph_store.save_networkx_graph(
-            name=os.path.join(GRAPH_STORAGE_DIR, "knowledge_graph.html")
+            name=os.path.join(gdir, "knowledge_graph.html")
         )
     except Exception:
         pass
@@ -131,15 +142,16 @@ def build_graph_index(documents=None, data_dir: str = None):
         show_progress=True,
     )
 
-    os.makedirs(GRAPH_STORAGE_DIR, exist_ok=True)
-    index.storage_context.persist(persist_dir=GRAPH_STORAGE_DIR)
-    print(f"[GraphRAG] 图索引构建完成，已持久化到: {GRAPH_STORAGE_DIR}")
+    gdir = _graph_storage_dir()
+    os.makedirs(gdir, exist_ok=True)
+    index.storage_context.persist(persist_dir=gdir)
+    print(f"[GraphRAG] 图索引构建完成，已持久化到: {gdir}")
 
     try:
         index.property_graph_store.save_networkx_graph(
-            name=os.path.join(GRAPH_STORAGE_DIR, "knowledge_graph.html")
+            name=os.path.join(gdir, "knowledge_graph.html")
         )
-        print(f"[GraphRAG] 知识图谱可视化已保存: {GRAPH_STORAGE_DIR}/knowledge_graph.html")
+        print(f"[GraphRAG] 知识图谱可视化已保存: {gdir}/knowledge_graph.html")
     except Exception:
         pass
 
@@ -148,14 +160,15 @@ def build_graph_index(documents=None, data_dir: str = None):
 
 def load_graph_index():
     """从持久化目录加载已有的图索引"""
-    if not os.path.exists(GRAPH_STORAGE_DIR):
+    gdir = _graph_storage_dir()
+    if not os.path.exists(gdir):
         return None
     try:
-        storage_context = StorageContext.from_defaults(persist_dir=GRAPH_STORAGE_DIR)
+        storage_context = StorageContext.from_defaults(persist_dir=gdir)
         index = PropertyGraphIndex.from_existing(
             property_graph_store=storage_context.property_graph_store,
         )
-        print(f"[GraphRAG] 从已有图索引加载: {GRAPH_STORAGE_DIR}")
+        print(f"[GraphRAG] 从已有图索引加载: {gdir}")
         return index
     except Exception:
         return None
@@ -166,8 +179,8 @@ def get_or_create_graph_index():
 
     优先级:
       1. 已有索引 -> 直接加载
-      2. data/triplets/*.jsonl 预构建三元组 -> 直接导入，不经过 LLM
-      3. data/ 目录下的原始文档 -> LLM 自动抽取实体/关系
+      2. profile/triplets/*.jsonl 预构建三元组 -> 直接导入，不经过 LLM
+      3. profile 目录下的原始文档 -> LLM 自动抽取实体/关系
     """
     index = load_graph_index()
     if index is not None:

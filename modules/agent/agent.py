@@ -51,6 +51,7 @@ def create_agent(
     skill_index=None,
     extra_tools: list = None,
     llm=None,
+    db_table_names: list[str] | None = None,
 ):
     """创建整合了多种检索工具和技能的 Agent
 
@@ -61,6 +62,7 @@ def create_agent(
         skill_index: 技能知识索引 (Knowledge Skills)
         extra_tools: 额外的自定义工具列表 (Tool Skills)
         llm: LLM 实例
+        db_table_names: 数据库表名列表 (用于生成工具描述)
     """
     tools = []
 
@@ -93,14 +95,14 @@ def create_agent(
         tools.append(graph_tool)
 
     if sql_query_engine is not None:
+        tables_desc = ", ".join(db_table_names) if db_table_names else "unknown"
         db_tool = QueryEngineTool.from_defaults(
             query_engine=sql_query_engine,
             name="database_query",
             description=(
                 "数据库查询工具。将自然语言转换为 SQL 查询，"
                 "适用于统计、排序、筛选、聚合等结构化数据问题。"
-                "当前数据库包含 employees (员工表: id, name, department, position, salary, city) "
-                "和 projects (项目表: id, project_name, lead_employee_id, budget, status) 两张表。"
+                f"当前数据库包含以下表: {tables_desc}。"
             ),
         )
         tools.append(db_tool)

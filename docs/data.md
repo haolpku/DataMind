@@ -6,17 +6,76 @@
 
 ---
 
+## Data Profile 机制
+
+DataMind 支持多套知识库共存，每套称为一个 **profile**。通过环境变量 `DATA_PROFILE` 切换：
+
+```bash
+# 使用默认 profile
+DATA_PROFILE=default python main.py
+
+# 切换到 2wiki 数据集
+DATA_PROFILE=2wiki python main.py
+
+# 对比不同分块策略
+DATA_PROFILE=2wiki_chunk512 python -m benchmark.run --questions data/bench/2wiki.jsonl
+DATA_PROFILE=2wiki_chunk1024 python -m benchmark.run --questions data/bench/2wiki.jsonl
+```
+
+每个 profile 的**数据和索引完全隔离**，切换 profile 不需要手动删除索引。
+
+### 目录结构
+
+```
+data/
+├── profiles/                    ← 知识库（按 profile 隔离）
+│   ├── default/                 ← DATA_PROFILE=default
+│   │   ├── chunks/*.jsonl       ← RAG 预分块数据
+│   │   ├── triplets/*.jsonl     ← GraphRAG 三元组
+│   │   ├── tables/*.sql         ← Database SQL 文件
+│   │   └── *.txt / *.md / ...   ← 原始文档
+│   ├── 2wiki/
+│   │   └── chunks/*.jsonl
+│   └── {自定义profile}/
+│       └── ...
+├── bench/                       ← 问题集（跨 profile 共享）
+│   ├── questions.jsonl
+│   └── 2wiki.jsonl
+├── skills/                      ← 技能文档（跨 profile 共享）
+│   └── *.md
+└── bench_raw/                   ← 原始下载缓存（.gitignore）
+```
+
+```
+storage/
+├── default/                     ← DATA_PROFILE=default 的索引
+│   ├── chroma.sqlite3
+│   ├── demo.db
+│   └── graph/
+├── 2wiki/                       ← DATA_PROFILE=2wiki 的索引
+│   └── ...
+```
+
+- `data/profiles/{profile}/` — profile 级数据，每个 profile 独立
+- `data/skills/` — 技能文档，跨 profile 共享
+- `data/bench/` — benchmark 问题集，跨 profile 共享
+- `storage/{profile}/` — 索引持久化，按 profile 自动隔离
+
+---
+
 ## 整体数据流
 
 ```
 上游数据处理流水线
     │
-    ├── 非结构化文档 ──→ data/ 目录 ─────────→ RAG 方式A (自动分块 + Embedding)
-    │                                           GraphRAG 方式A (LLM 自动抽取)
+    ├── 非结构化文档 ──→ profiles/{profile}/ ───→ RAG 方式A (自动分块 + Embedding)
+    │                                              GraphRAG 方式A (LLM 自动抽取)
     │
-    ├── 预分块数据 ───→ data/chunks/*.jsonl ──→ RAG 方式B (跳过分块, 仅 Embedding)
+    ├── 预分块数据 ───→ profiles/{profile}/chunks/*.jsonl → RAG 方式B (跳过分块)
     │
-    ├── 预构建三元组 ─→ data/triplets/*.jsonl → GraphRAG 方式B (直接导入, 无 API 消耗)
+    ├── 预构建三元组 ─→ profiles/{profile}/triplets/*.jsonl → GraphRAG 方式B (直接导入)
+    │
+    ├── SQL 建表脚本 ─→ profiles/{profile}/tables/*.sql → Database (自动建表+导入)
     │
     ├── 技能/SOP 文档 → data/skills/*.md ────→ Skills (知识型技能检索)
     │
@@ -31,7 +90,7 @@
 
 ### 数据要求
 
-将非结构化文档直接放入 `data/` 目录，支持子目录。
+将非结构化文档直接放入 profile 目录（如 `data/profiles/default/`），支持子目录。
 
 ### 支持的格式
 
@@ -49,7 +108,7 @@
 ### 目录结构示例
 
 ```
-data/
+data/profiles/default/
 ├── 产品文档/
 │   ├── API参考手册.md
 │   ├── 用户指南.pdf
@@ -82,7 +141,7 @@ data/
 
 如果上游已完成分块，可以直接提供预分块数据，系统只负责 Embedding + 存储，跳过 SentenceSplitter 分块步骤。
 
-**输入格式：JSON Lines 文件**，放入 `data/chunks/` 目录。
+**输入格式：JSON Lines 文件**，放入 `data/profiles/{profile}/chunks/` 目录。
 
 ```jsonl
 {"text": "LlamaIndex 是一个用于构建 RAG 应用的 Python 框架...", "metadata": {"source": "技术文档.md", "chapter": "概述"}}
@@ -90,17 +149,19 @@ data/
 {"text": "张三是工程部的高级工程师，负责 RAG 项目的开发...", "metadata": {"source": "人员信息.txt"}}
 ```
 
-每行一个 JSON 对象：
+每行一个 JSON 对象（字段定义见 `schema/types.py` 中的 `RAGChunk`）：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `text` | string | 是 | chunk 的文本内容 |
 | `metadata` | object | 否 | 任意键值对，用于检索时的上下文展示和过滤 |
+| `image_path` | string | 否 | 图片文件路径（多模态预留，当前不消费） |
+| `modality` | string | 否 | `"text"` / `"image"` / `"text_image"`（多模态预留，默认 `"text"`） |
 
 **自动检测逻辑**：系统启动时按以下优先级加载：
 1. 已有索引 → 直接加载（不重新构建）
-2. `data/chunks/*.jsonl` 存在 → 方式 B（预分块，跳过 SentenceSplitter）
-3. `data/` 下有文档 → 方式 A（自动分块）
+2. `profiles/{profile}/chunks/*.jsonl` 存在 → 方式 B（预分块，跳过 SentenceSplitter）
+3. `profiles/{profile}/` 下有文档 → 方式 A（自动分块）
 
 **分块建议**：
 - 每个 chunk 建议 200-1000 字（中文），过长会降低检索精度，过短会丢失上下文
@@ -108,9 +169,9 @@ data/
 
 ### 导入方式
 
-将文件放入 `data/` 目录（方式 A）或 `data/chunks/` 目录（方式 B）后：
+将文件放入 profile 目录（方式 A）或 `profiles/{profile}/chunks/` 目录（方式 B）后：
 - Web 界面：RAG 面板 → 点击"重建索引"
-- 命令行：`rm -rf storage/ && python main.py`
+- 命令行：`rm -rf storage/{profile}/ && python main.py`
 
 ### 数据处理流水线输出示例
 
@@ -118,7 +179,7 @@ data/
 # 方式 A: 输出原始文档（系统自动分块 + Embedding）
 import os
 
-output_dir = "/path/to/DataMind/data"
+output_dir = "/path/to/DataMind/data/profiles/default"
 
 for doc in processed_documents:
     filepath = os.path.join(output_dir, f"{doc['title']}.md")
@@ -131,7 +192,7 @@ for doc in processed_documents:
 # 方式 B: 输出预分块 JSONL（系统只做 Embedding，跳过分块）
 import json, os
 
-chunks_dir = "/path/to/DataMind/data/chunks"
+chunks_dir = "/path/to/DataMind/data/profiles/default/chunks"
 os.makedirs(chunks_dir, exist_ok=True)
 
 with open(os.path.join(chunks_dir, "my_chunks.jsonl"), "w", encoding="utf-8") as f:
@@ -152,7 +213,7 @@ GraphRAG 有**两种数据输入方式**：
 
 #### 方式 A：自动抽取（默认）
 
-与 RAG 共享同一个 `data/` 目录。LLM 会自动从文档中抽取实体和关系，无需额外处理。
+与 RAG 共享同一个 profile 目录。LLM 会自动从文档中抽取实体和关系，无需额外处理。
 
 适合：文档中包含丰富的实体关系描述（人物、组织、产品、技术之间的关系）。
 
@@ -165,7 +226,7 @@ GraphRAG 有**两种数据输入方式**：
 
 如果上游已经抽取好了实体和关系，可以直接导入三元组数据，**跳过 LLM 抽取步骤，不消耗任何 API token**。
 
-**输入格式：JSON Lines 文件**，放入 `data/triplets/` 目录。
+**输入格式：JSON Lines 文件**，放入 `data/profiles/{profile}/triplets/` 目录。
 
 ```jsonl
 {"subject": "张三", "relation": "任职于", "object": "工程部"}
@@ -175,7 +236,7 @@ GraphRAG 有**两种数据输入方式**：
 {"subject": "LlamaIndex", "relation": "属于", "object": "Python框架"}
 ```
 
-每行一个 JSON 对象：
+每行一个 JSON 对象（字段定义见 `schema/types.py` 中的 `GraphTriple`）：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -184,20 +245,24 @@ GraphRAG 有**两种数据输入方式**：
 | `object` | string | 是 | 客体实体 |
 | `subject_type` | string | 否 | 主体类型（如 "Person"），默认 "entity" |
 | `object_type` | string | 否 | 客体类型（如 "Organization"），默认 "entity" |
+| `subject_properties` | object | 否 | 主体附加属性（多模态预留，如 `{"image": "img/a.png"}`） |
+| `object_properties` | object | 否 | 客体附加属性（多模态预留） |
+| `confidence` | float | 否 | 置信度（默认 1.0） |
+| `source` | string | 否 | 来源标识 |
 
 **自动检测逻辑**：系统启动时按以下优先级加载：
 1. 已有图索引 → 直接加载
-2. `data/triplets/*.jsonl` 存在 → 方式 B（直接导入，不经过 LLM）
-3. `data/` 下有文档 → 方式 A（LLM 自动抽取）
+2. `profiles/{profile}/triplets/*.jsonl` 存在 → 方式 B（直接导入，不经过 LLM）
+3. `profiles/{profile}/` 下有文档 → 方式 A（LLM 自动抽取）
 
-**导入方式**：将 JSONL 文件放入 `data/triplets/` 目录后，系统会**自动检测并导入**，无需修改任何代码。
+**导入方式**：将 JSONL 文件放入 profile 的 `triplets/` 目录后，系统会**自动检测并导入**，无需修改任何代码。
 
 ### 数据处理流水线输出示例
 
 ```python
 import json
 
-output_path = "/path/to/DataMind/data/triplets/knowledge_graph.jsonl"
+output_path = "/path/to/DataMind/data/profiles/default/triplets/knowledge_graph.jsonl"
 
 # 上游抽取的三元组
 triplets = [
@@ -217,116 +282,59 @@ with open(output_path, "w", encoding="utf-8") as f:
 
 ### 数据要求
 
-Database 模块使用 SQLite，接受两种输入方式。
+Database 模块使用 SQLite，系统会**自动检测数据来源**，按以下优先级加载：
 
-#### 方式 A：SQLite 数据库文件（推荐）
+1. profile 目录下有 `tables/*.sql` → 执行 SQL 文件建表 + 插入数据
+2. 无 SQL 文件 → fallback 到内置 demo 员工数据库
 
-直接提供一个 `.db` 文件，放到 `storage/` 目录下。
+**不需要手动修改任何代码**，系统会自动识别表名并配置 Agent 工具描述。
 
-**文件路径**：`storage/demo.db`（或在 `modules/database/database.py` 中修改 `DB_PATH`）
+#### 方式 A：SQL 文件导入（推荐）
+
+将 `.sql` 文件放入 `data/profiles/{profile}/tables/` 目录：
+
+```
+data/profiles/mydata/tables/
+├── 01_schema.sql     ← 建表语句（按文件名排序执行）
+└── 02_data.sql       ← 插入数据
+```
+
+SQL 文件示例 (`01_schema.sql`):
+
+```sql
+CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    price REAL NOT NULL,
+    stock INTEGER NOT NULL
+);
+```
+
+SQL 文件示例 (`02_data.sql`):
+
+```sql
+INSERT OR REPLACE INTO products VALUES (1, '笔记本电脑', '电子产品', 6999.0, 50);
+INSERT OR REPLACE INTO products VALUES (2, '机械键盘', '外设', 399.0, 200);
+INSERT OR REPLACE INTO products VALUES (3, '显示器', '电子产品', 2499.0, 80);
+```
+
+SQL 文件按文件名排序依次执行，建议用数字前缀控制顺序。
+
+#### 方式 B：直接提供 SQLite 数据库文件
+
+也可以在上游预处理时直接生成 SQLite 文件，放到 `storage/{profile}/demo.db`。
 
 ```python
-# 上游数据处理脚本输出 SQLite 文件
 import sqlite3
 
-db_path = "/path/to/DataMind/storage/demo.db"
+db_path = "/path/to/DataMind/storage/default/demo.db"
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
-
-# 建表
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        category TEXT NOT NULL,
-        price REAL NOT NULL,
-        stock INTEGER NOT NULL
-    )
-""")
-
-# 插入数据
-data = [
-    (1, "笔记本电脑", "电子产品", 6999.0, 50),
-    (2, "机械键盘", "外设", 399.0, 200),
-    (3, "显示器", "电子产品", 2499.0, 80),
-]
+cursor.execute("CREATE TABLE IF NOT EXISTS products (...)")
 cursor.executemany("INSERT OR REPLACE INTO products VALUES (?, ?, ?, ?, ?)", data)
-
 conn.commit()
 conn.close()
-```
-
-#### 方式 B：CSV 文件 + 自动建表
-
-提供 CSV 文件，由数据预处理脚本自动转换为 SQLite 表。
-
-**CSV 格式要求**：
-- UTF-8 编码
-- 首行为列名
-- 列名使用英文或拼音，避免特殊字符
-
-```csv
-id,name,category,price,stock
-1,笔记本电脑,电子产品,6999.0,50
-2,机械键盘,外设,399.0,200
-3,显示器,电子产品,2499.0,80
-```
-
-**转换脚本示例**：
-
-```python
-import pandas as pd
-import sqlite3
-
-db_path = "/path/to/DataMind/storage/demo.db"
-conn = sqlite3.connect(db_path)
-
-# 读取 CSV 并写入 SQLite
-for csv_file in ["products.csv", "orders.csv", "customers.csv"]:
-    table_name = csv_file.replace(".csv", "")
-    df = pd.read_csv(csv_file)
-    df.to_sql(table_name, conn, if_exists="replace", index=False)
-
-conn.close()
-```
-
-### 导入后的配置
-
-数据导入 SQLite 后，需要修改两个地方让 DataMind 识别你的表：
-
-**1. 修改 `modules/database/database.py`**：
-
-```python
-def create_sql_query_engine(engine=None):
-    if engine is None:
-        engine = create_engine(f"sqlite:///{DB_PATH}")
-
-    sql_database = SQLDatabase(
-        engine,
-        include_tables=["products", "orders", "customers"],  # <-- 改成你的表名
-    )
-    query_engine = NLSQLTableQueryEngine(
-        sql_database=sql_database,
-        tables=["products", "orders", "customers"],           # <-- 同上
-    )
-    return query_engine
-```
-
-**2. 修改 `modules/agent/agent.py` 中的工具描述**：
-
-```python
-db_tool = QueryEngineTool.from_defaults(
-    query_engine=sql_query_engine,
-    name="database_query",
-    description=(
-        "数据库查询工具。将自然语言转换为 SQL 查询。"
-        "当前数据库包含: "
-        "products (商品表: id, name, category, price, stock), "
-        "orders (订单表: ...), "
-        "customers (客户表: ...)"
-        # ↑ 告诉 Agent 你的表结构，它才能正确生成 SQL
-    ),
-)
 ```
 
 ### 数据类型建议
@@ -429,8 +437,9 @@ import json
 import sqlite3
 
 DATAMIND_ROOT = "/path/to/DataMind"
-DATA_DIR = os.path.join(DATAMIND_ROOT, "data")
-STORAGE_DIR = os.path.join(DATAMIND_ROOT, "storage")
+PROFILE = "default"  # 目标 profile 名称
+DATA_DIR = os.path.join(DATAMIND_ROOT, "data", "profiles", PROFILE)
+STORAGE_DIR = os.path.join(DATAMIND_ROOT, "storage", PROFILE)
 
 
 def export_rag_documents(documents: list[dict]):
@@ -489,7 +498,7 @@ def export_skill_documents(skills: list[dict]):
     Args:
         skills: [{"title": "技能标题", "content": "Markdown 内容"}]
     """
-    skills_dir = os.path.join(DATA_DIR, "skills")
+    skills_dir = os.path.join(DATAMIND_ROOT, "data", "skills")
     os.makedirs(skills_dir, exist_ok=True)
     for skill in skills:
         filepath = os.path.join(skills_dir, f"{skill['title']}.md")
@@ -577,12 +586,13 @@ if __name__ == "__main__":
 
 | 模块 | 增量更新 | 全量重建 |
 |------|---------|---------|
-| RAG | 往 `data/` 新增文件后点击"重建索引" | 删除 `storage/` 后重启 |
-| GraphRAG | 当前仅支持全量重建 | 删除 `storage/graph/` 后重启 |
+| RAG | 往 profile 目录新增文件后点击"重建索引" | 删除 `storage/{profile}/` 后重启 |
+| GraphRAG | 当前仅支持全量重建 | 删除 `storage/{profile}/graph/` 后重启 |
 | Skills | 往 `data/skills/` 新增 .md 文件后点击"重建索引" | 删除 skills_knowledge collection 后重启 |
-| Database | 直接修改 `storage/demo.db` 即时生效 | 删除 `.db` 文件后重启 |
+| Database | 直接修改 `storage/{profile}/demo.db` 即时生效 | 删除 `.db` 文件后重启 |
 
 注意：
+- 切换 `DATA_PROFILE` 后，索引自动使用新 profile 的 `storage/` 目录，不需要手动删除
 - RAG 方式 A 和 GraphRAG 方式 A 重建需要调用 LLM API（Embedding / 实体抽取），大量文档时会消耗较多 token
 - RAG 方式 B（预分块）仅消耗 Embedding API token，不涉及 LLM 分块
 - GraphRAG 方式 B（预构建三元组）不消耗任何 API token，直接导入图数据库

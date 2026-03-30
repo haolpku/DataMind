@@ -78,7 +78,9 @@ DataMind/
 ├── .env.example           # 环境变量模板 (复制为 .env 填入 API Key)
 ├── server.py              # Web 入口: FastAPI 后端 + 前端页面
 ├── main.py                # 终端入口: 交互式命令行对话
-├── benchmark.py           # 并发推理测评入口
+├── benchmark/             # 并发推理测评
+│   ├── run.py             #   测评运行器 (并发推理 + 指标统计)
+│   └── evaluate.py        #   答案评估 (EM / F1 对比)
 ├── requirements.txt       # Python 依赖
 ├── core/                  # 核心层
 │   ├── bootstrap.py       #   共享初始化逻辑 (AppState)
@@ -104,19 +106,28 @@ DataMind/
 │   ├── data.md            #   数据格式规范
 │   ├── demo.md            #   示例问题演示
 │   └── benchmark.md       #   Benchmark 使用指南
+├── schema/                # 数据契约定义 (Pydantic Models, 含多模态预留)
+│   └── types.py           #   RAGChunk / GraphTriple / DatabaseImport
 ├── data/                  # 数据目录
-│   ├── *.txt/md/pdf/...   #   RAG 原始文档
-│   ├── chunks/            #   RAG 预分块数据 (JSONL)
-│   ├── triplets/          #   GraphRAG 预构建三元组 (JSONL)
-│   └── skills/            #   知识型技能文档 (Markdown)
-└── storage/               # 自动生成: 索引/图谱/数据库持久化
+│   ├── profiles/          #   知识库 (按 DATA_PROFILE 隔离)
+│   │   ├── default/       #     默认 profile
+│   │   │   ├── chunks/    #       RAG 预分块数据 (JSONL)
+│   │   │   ├── triplets/  #       GraphRAG 三元组 (JSONL)
+│   │   │   ├── tables/    #       Database SQL 文件
+│   │   │   └── *.txt/...  #       RAG 原始文档
+│   │   └── {profile}/     #     其他 profile
+│   ├── bench/             #   Benchmark 问题集 (跨 profile 共享)
+│   └── skills/            #   知识型技能文档 (跨 profile 共享)
+└── storage/               # 自动生成: 索引持久化 (按 profile 隔离)
+    ├── default/
+    └── {profile}/
 ```
 
 ---
 
 ## 如何自定义你的 RAG 数据
 
-RAG 模块会把 `data/` 目录下的所有文档加载、分块、向量化后存入 Chroma 向量数据库。
+RAG 模块会把 profile 目录（`data/profiles/{DATA_PROFILE}/`）下的所有文档加载、分块、向量化后存入 Chroma 向量数据库。
 
 ### 支持的文档格式
 
@@ -128,10 +139,10 @@ PDF, TXT, Markdown, DOCX, CSV, HTML, JSON, EPUB 等（LlamaIndex SimpleDirectory
 
 **通过命令行**：
 
-1. 将文件放入 `data/` 目录（支持子目录递归扫描）
+1. 将文件放入 profile 目录（支持子目录递归扫描）
 
 ```
-data/
+data/profiles/default/
 ├── 公司手册.pdf
 ├── 技术文档/
 │   ├── API说明.md
@@ -139,11 +150,17 @@ data/
 └── FAQ.docx
 ```
 
-2. 删除 `storage/` 目录，重新运行
+2. 删除对应 profile 的索引，重新运行
 
 ```bash
-rm -rf storage/
+rm -rf storage/default/
 python main.py   # 或 python server.py
+```
+
+也可以通过 `DATA_PROFILE` 环境变量切换不同的知识库，索引自动隔离：
+
+```bash
+DATA_PROFILE=mydata python main.py
 ```
 
 ### 调整分块参数
@@ -556,11 +573,16 @@ CHAT_HISTORY_TOKEN_RATIO=0.7                  # 短期记忆占比
 **通过命令行**：
 
 ```bash
-rm -rf storage/
+# 重建当前 profile 的索引
+rm -rf storage/default/
 python main.py   # 或 python server.py
+
+# 重建指定 profile
+rm -rf storage/2wiki/
+DATA_PROFILE=2wiki python main.py
 ```
 
-这会重建向量索引、知识图谱，并重新创建示例数据库。
+这会重建向量索引、知识图谱，并重新创建数据库。
 
 ---
 

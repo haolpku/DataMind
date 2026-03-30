@@ -2,8 +2,8 @@
 文档索引模块: 加载文档 -> 分块 -> 构建 Chroma 向量索引
 
 支持两种输入:
-  方式 A: 原始文档 (data/ 目录) -> SentenceSplitter 自动分块 -> Embedding -> 存 Chroma
-  方式 B: 预分块 JSONL (data/chunks/*.jsonl) -> 跳过分块 -> Embedding -> 存 Chroma
+  方式 A: 原始文档 (profile 目录) -> SentenceSplitter 自动分块 -> Embedding -> 存 Chroma
+  方式 B: 预分块 JSONL (profile/chunks/*.jsonl) -> 跳过分块 -> Embedding -> 存 Chroma
 """
 
 import json
@@ -20,23 +20,24 @@ from llama_index.core.schema import TextNode
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
 from config import settings
+from schema.types import RAGChunk
 
-PRE_CHUNKED_DIR = os.path.join(settings.data_dir, "chunks")
+
+RESERVED_SUBDIRS = {"chunks", "triplets", "tables"}
 
 
 def load_documents(data_dir: str = None):
-    """从 data/ 目录加载所有文档 (支持 PDF, TXT, MD, DOCX 等)
-    自动排除 chunks/, triplets/, skills/ 子目录"""
+    """从 profile 目录加载所有文档 (支持 PDF, TXT, MD, DOCX 等)
+    自动排除 chunks/, triplets/, tables/ 等保留子目录"""
     if data_dir is None:
         data_dir = settings.data_dir
     if not os.path.exists(data_dir):
         print(f"[WARNING] data 目录不存在: {data_dir}")
         return []
 
-    exclude_dirs = {"chunks", "triplets", "skills"}
     files = []
     for item in os.listdir(data_dir):
-        if item in exclude_dirs or item.startswith("."):
+        if item in RESERVED_SUBDIRS or item.startswith("."):
             continue
         full_path = os.path.join(data_dir, item)
         if os.path.isfile(full_path):
@@ -57,14 +58,14 @@ def load_documents(data_dir: str = None):
     return documents
 
 
-def load_pre_chunked(chunks_dir: str = PRE_CHUNKED_DIR):
-    """从 data/chunks/ 目录加载预分块的 JSONL 文件，直接构建 TextNode
+def load_pre_chunked(chunks_dir: str = None):
+    """从 profile/chunks/ 目录加载预分块的 JSONL 文件，通过 RAGChunk schema 校验。
 
     JSONL 格式 (每行一个 JSON):
         {"text": "chunk 内容", "metadata": {"source": "来源文件", ...}}
-
-    metadata 字段可选，可以包含任意键值对作为检索时的过滤条件。
     """
+    if chunks_dir is None:
+        chunks_dir = os.path.join(settings.data_dir, "chunks")
     if not os.path.exists(chunks_dir):
         return []
 
@@ -80,18 +81,27 @@ def load_pre_chunked(chunks_dir: str = PRE_CHUNKED_DIR):
                 if not line:
                     continue
                 try:
-                    item = json.loads(line)
+                    raw = json.loads(line)
                 except json.JSONDecodeError:
                     print(f"[WARNING] {filepath} 第 {line_num} 行 JSON 解析失败，跳过")
                     continue
 
-                text = item.get("text", "")
-                if not text:
+                try:
+                    chunk = RAGChunk.model_validate(raw)
+                except Exception as e:
+                    print(f"[WARNING] {filepath} 第 {line_num} 行 schema 校验失败: {e}，跳过")
                     continue
 
-                metadata = item.get("metadata", {})
+                if not chunk.text:
+                    continue
+
+                metadata = chunk.metadata.copy()
                 metadata["source_file"] = os.path.basename(filepath)
-                node = TextNode(text=text, metadata=metadata)
+                if chunk.image_path:
+                    metadata["image_path"] = chunk.image_path
+                if chunk.modality.value != "text":
+                    metadata["modality"] = chunk.modality.value
+                node = TextNode(text=chunk.text, metadata=metadata)
                 nodes.append(node)
 
     if nodes:
@@ -142,7 +152,7 @@ def get_or_create_index():
 
     优先级:
       1. 已有索引 -> 直接加载
-      2. data/chunks/*.jsonl 预分块数据 -> 跳过分块，直接 Embedding
+      2. profiles/{profile}/chunks/*.jsonl 预分块数据 -> 跳过分块，直接 Embedding
       3. data/ 目录下的原始文档 -> SentenceSplitter 分块 + Embedding
     """
     chroma_client = chromadb.PersistentClient(path=settings.storage_dir)

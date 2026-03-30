@@ -2,7 +2,7 @@
 
 ## 概述
 
-`benchmark.py` 用于对 DataMind 进行并发推理测评，直接调用 Python API（不经过 HTTP），支持：
+`benchmark/` 包用于对 DataMind 进行并发推理测评和答案评估，直接调用 Python API（不经过 HTTP），支持：
 
 - 可配置的并发数
 - 每个请求独立的 Session 隔离（无记忆交叉污染）
@@ -21,12 +21,14 @@ Benchmark 需要两部分数据：**知识库文档**和**问题集**。
 知识库的准备方式与正常使用 DataMind 完全一致，参见 [data.md](data.md)。
 
 简单来说：
-- **原始文档**放入 `data/` 目录（方式 A，系统自动分块）
-- **预分块数据**放入 `data/chunks/` 目录（方式 B，JSONL 格式）
+- **原始文档**放入 `data/profiles/{profile}/` 目录（方式 A，系统自动分块）
+- **预分块数据**放入 `data/profiles/{profile}/chunks/` 目录（方式 B，JSONL 格式）
 
 ```
-data/chunks/my_bench_corpus.jsonl    ← 每行一个 {"text": "...", "metadata": {...}}
+data/profiles/2wiki/chunks/corpus.jsonl    ← 每行一个 {"text": "...", "metadata": {...}}
 ```
+
+通过 `DATA_PROFILE` 环境变量指定使用哪个 profile，索引会自动隔离，不需要手动删除 `storage/`。
 
 格式与 data.md 中 RAG 方式 B 完全相同：
 
@@ -42,14 +44,14 @@ data/chunks/my_bench_corpus.jsonl    ← 每行一个 {"text": "...", "metadata"
 {"text": "another chunk...", "metadata": {"source": "2wikimultihop"}}
 ```
 
-> **注意**：换新的知识库后，必须先清除旧索引：`rm -rf storage/`，首次运行会自动重建。
+> **注意**：切换 profile 即可使用不同知识库，不需要手动清除索引。如需在同一 profile 下重建索引：`rm -rf storage/{profile}/`。
 
 ### 2. 问题集
 
 问题集为 **JSONL 格式**，放在任意位置，运行时通过 `--questions` 参数指定路径。
 
 ```
-data/bench_questions.jsonl    ← 每行一个 JSON
+data/bench/questions.jsonl    ← 每行一个 JSON
 ```
 
 **最简格式**（仅测延迟和吞吐）：
@@ -80,31 +82,34 @@ data/bench_questions.jsonl    ← 每行一个 JSON
 ## 运行
 
 ```bash
-# 基础用法（默认 5 并发）
-python benchmark.py --questions data/bench_questions.jsonl
+# 基础用法（默认 5 并发，使用 default profile）
+python -m benchmark.run --questions data/bench/questions.jsonl
 
 # 指定并发数
-python benchmark.py --questions data/bench_questions.jsonl --concurrency 30
+python -m benchmark.run --questions data/bench/questions.jsonl --concurrency 30
 
 # 指定输出文件
-python benchmark.py --questions data/bench_questions.jsonl --concurrency 50 --output results.json
+python -m benchmark.run --questions data/bench/questions.jsonl --concurrency 50 --output results.json
 ```
 
 ### 通过环境变量切换配置
 
 ```bash
+# 切换 data profile（使用不同的知识库）
+DATA_PROFILE=2wiki python -m benchmark.run --questions data/bench/2wiki.jsonl
+
 # 切换检索模式
-RETRIEVER_MODE=multi_query python benchmark.py --questions data/bench_questions.jsonl
+RETRIEVER_MODE=multi_query python -m benchmark.run --questions data/bench/questions.jsonl
 
 # 切换模型
-LLM_MODEL=deepseek-chat python benchmark.py --questions data/bench_questions.jsonl
+LLM_MODEL=deepseek-chat python -m benchmark.run --questions data/bench/questions.jsonl
 
 # 调整检索 top_k
-SIMILARITY_TOP_K=5 python benchmark.py --questions data/bench_questions.jsonl
+SIMILARITY_TOP_K=5 python -m benchmark.run --questions data/bench/questions.jsonl
 
-# 组合使用
-RETRIEVER_MODE=multi_query SIMILARITY_TOP_K=5 LLM_MODEL=gpt-4o \
-  python benchmark.py --questions data/bench_questions.jsonl --concurrency 50
+# 组合: 不同 profile + 不同检索策略
+DATA_PROFILE=2wiki RETRIEVER_MODE=multi_query SIMILARITY_TOP_K=5 LLM_MODEL=gpt-4o \
+  python -m benchmark.run --questions data/bench/2wiki.jsonl --concurrency 50
 ```
 
 所有可用环境变量参见 `.env.example`。
@@ -147,11 +152,50 @@ RETRIEVER_MODE=multi_query SIMILARITY_TOP_K=5 LLM_MODEL=gpt-4o \
 ```json
 {
   "index": 0,
-  "question": "RAG的核心原理是什么？",
-  "answer": "RAG 的核心原理是...",
+  "question": "Where does X's wife work at?",
+  "answer": "According to the information...",
   "error": null,
-  "latency_s": 5.632
+  "latency_s": 5.632,
+  "reference_answer": "Sunday Times",
+  "question_id": "9d054e98..."
 }
+```
+
+`reference_answer` 和 `question_id` 仅在问题集中包含这些字段时才会出现。
+
+---
+
+## 答案评估
+
+当问题集包含 `reference_answer` 时，可使用评估脚本对比生成答案与标准答案：
+
+```bash
+python -m benchmark.evaluate benchmark_results.json
+```
+
+评估指标：
+
+| 指标 | 说明 |
+|------|------|
+| **Exact Match (EM)** | 标准答案（normalize 后）是否完整出现在生成答案中 |
+| **Token F1** | 基于 token 重叠计算的 F1 Score，适用于答案较长或表述不一致的场景 |
+
+终端会输出汇总报告和未命中的问题列表，同时自动保存 JSON 评估报告：
+
+```
+=======================================================
+  Evaluation Report
+=======================================================
+  Total evaluated:   1000
+  Exact Match:       360/1000 (36.0%)
+  Avg Token-F1:      0.4521
+=======================================================
+```
+
+指定输出路径：
+
+```bash
+python -m benchmark.evaluate benchmark_results.json --output my_eval.json
 ```
 
 ---
@@ -200,22 +244,23 @@ for f in ['chunks.json', 'questions.json']:
 
 ### 转换为 DataMind 格式
 
-将 chunks 转为 `data/chunks/*.jsonl`（每行一个 `{"text": "...", "metadata": {...}}`），将 questions 转为 `data/bench_*.jsonl`（每行一个 `{"question": "..."}`）。
+将 chunks 转为 `data/profiles/2wiki/chunks/*.jsonl`（每行一个 `{"text": "...", "metadata": {...}}`），将 questions 转为 `data/bench/*.jsonl`（每行一个 `{"question": "..."}`）。
 
 具体的转换脚本取决于你的数据集格式和需要的 metadata，这里不做硬性规定。转换后的目录结构应该是：
 
 ```
 data/
-├── chunks/
-│   └── 2wiki_chunks.jsonl       ← 知识库 chunks (JSONL)
-└── bench_2wiki.jsonl            ← 问题集 (JSONL)
+├── profiles/2wiki/
+│   └── chunks/
+│       └── 2wiki_chunks.jsonl       ← 知识库 chunks (JSONL)
+└── bench/
+    └── 2wiki.jsonl                  ← 问题集 (JSONL)
 ```
 
-### 清除旧索引并运行
+### 运行
 
 ```bash
-rm -rf storage/
-python benchmark.py --questions data/bench_2wiki.jsonl --concurrency 50 --output benchmark_2wiki.json
+DATA_PROFILE=2wiki python -m benchmark.run --questions data/bench/2wiki.jsonl --concurrency 50 --output benchmark_2wiki.json
 ```
 
 ---

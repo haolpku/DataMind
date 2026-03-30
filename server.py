@@ -28,9 +28,9 @@ from core.bootstrap import initialize, recreate_agent, AppState
 from core.session import SessionManager
 
 from modules.rag.indexer import load_documents, load_pre_chunked, build_index
-from modules.graphrag.graph_rag import build_graph_index, GRAPH_STORAGE_DIR
+from modules.graphrag.graph_rag import build_graph_index, _graph_storage_dir
 from modules.skills.knowledge import build_skill_index, load_skill_documents
-from modules.database.database import DB_PATH
+from modules.database.database import _db_path
 from modules.memory.memory import create_memory
 
 import chromadb
@@ -262,7 +262,7 @@ async def rebuild_rag_index():
     else:
         docs = load_documents()
         if not docs:
-            raise HTTPException(400, "data 目录为空，且 data/chunks/ 中无预分块数据")
+            raise HTTPException(400, "profile 目录为空，且 chunks/ 中无预分块数据")
         index = build_index(documents=docs)
         mode = "文档分块"
 
@@ -308,8 +308,9 @@ async def graphrag_status():
 async def rebuild_graph_index():
     try:
         import shutil
-        if os.path.exists(GRAPH_STORAGE_DIR):
-            shutil.rmtree(GRAPH_STORAGE_DIR)
+        gdir = _graph_storage_dir()
+        if os.path.exists(gdir):
+            shutil.rmtree(gdir)
         graph_index = build_graph_index()
         _state.graph_index = graph_index
         recreate_agent(_state)
@@ -339,7 +340,7 @@ async def list_tables():
 
         tables.append({"name": table_name, "columns": columns, "row_count": count})
 
-    return {"tables": tables, "db_path": DB_PATH}
+    return {"tables": tables, "db_path": _db_path()}
 
 
 @app.get("/api/database/query")

@@ -15,7 +15,7 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 
 from modules.rag.indexer import get_or_create_index
 from modules.graphrag.graph_rag import get_or_create_graph_index
-from modules.database.database import init_demo_database, create_sql_query_engine
+from modules.database.database import init_database, create_sql_query_engine
 from modules.skills.tools import get_all_skills
 from modules.skills.knowledge import get_or_create_skill_index
 from modules.agent.agent import create_agent
@@ -28,6 +28,7 @@ class AppState:
     vector_index: Any = None
     graph_index: Any = None
     db_engine: Any = None
+    db_table_names: list = field(default_factory=list)
     sql_query_engine: Any = None
     skills: list = field(default_factory=list)
     skill_index: Any = None
@@ -68,6 +69,11 @@ def initialize(cfg: Settings = None) -> AppState:
 
     state = AppState()
 
+    # 0. Profile info
+    print(f"[INFO] Data profile: {cfg.data_profile}")
+    print(f"[INFO] Data dir:     {cfg.data_dir}")
+    print(f"[INFO] Storage dir:  {cfg.storage_dir}")
+
     # 1. LLM + Embedding
     print("[INFO] 初始化配置...")
     state.llm = _create_llm(cfg)
@@ -91,8 +97,8 @@ def initialize(cfg: Settings = None) -> AppState:
     # 4. Database
     print("\n[INFO] === 初始化 Database ===")
     try:
-        state.db_engine = init_demo_database()
-        state.sql_query_engine = create_sql_query_engine(state.db_engine)
+        state.db_engine, state.db_table_names = init_database()
+        state.sql_query_engine = create_sql_query_engine(state.db_engine, state.db_table_names)
     except Exception as e:
         print(f"[WARNING] Database 初始化失败: {e}")
 
@@ -117,6 +123,7 @@ def initialize(cfg: Settings = None) -> AppState:
         skill_index=state.skill_index,
         extra_tools=state.skills,
         llm=state.llm,
+        db_table_names=state.db_table_names,
     )
 
     print("[INFO] DataMind 初始化完成")
@@ -132,4 +139,5 @@ def recreate_agent(state: AppState) -> None:
         skill_index=state.skill_index,
         extra_tools=state.skills,
         llm=state.llm,
+        db_table_names=state.db_table_names,
     )

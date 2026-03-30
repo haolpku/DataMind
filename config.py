@@ -1,5 +1,5 @@
 """
-统一配置: LLM + Embedding + 路径 + Retriever + Memory
+统一配置: LLM + Embedding + 路径 + Retriever + Memory + Data Profile
 
 所有配置项优先从环境变量读取，fallback 到默认值。
 支持 .env 文件自动加载。
@@ -8,6 +8,7 @@
   LLM_API_BASE=https://api.deepseek.com/v1
   LLM_MODEL=deepseek-chat
   RETRIEVER_MODE=multi_query
+  DATA_PROFILE=2wiki_chunk512
 
 常见 API 提供商示例:
   DeepSeek:  llm_api_base="https://api.deepseek.com/v1",  llm_model="deepseek-chat"
@@ -44,22 +45,33 @@ class Settings(BaseSettings):
     memory_token_limit: int = 30000
     chat_history_token_ratio: float = 0.7
 
-    # ---- Paths (computed from project root, not from env) ----
+    # ---- Data Profile ----
+    data_profile: str = "default"
+
+    # ---- Paths ----
     @property
     def base_dir(self) -> str:
         return os.path.dirname(os.path.abspath(__file__))
 
     @property
     def data_dir(self) -> str:
-        return os.path.join(self.base_dir, "data")
+        """Profile 级数据目录: data/profiles/{data_profile}/"""
+        return os.path.join(self.base_dir, "data", "profiles", self.data_profile)
+
+    @property
+    def bench_dir(self) -> str:
+        """问题集目录（跨 profile 共享）: data/bench/"""
+        return os.path.join(self.base_dir, "data", "bench")
 
     @property
     def storage_dir(self) -> str:
-        return os.path.join(self.base_dir, "storage")
+        """索引持久化目录（按 profile 隔离）: storage/{data_profile}/"""
+        return os.path.join(self.base_dir, "storage", self.data_profile)
 
     @property
     def skills_dir(self) -> str:
-        return os.path.join(self.data_dir, "skills")
+        """技能文档目录（跨 profile 共享）: data/skills/"""
+        return os.path.join(self.base_dir, "data", "skills")
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

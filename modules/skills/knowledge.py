@@ -82,7 +82,7 @@ def get_or_create_skill_index():
 
     docs = load_skill_documents()
     if not docs:
-        print("[Skills] data/skills/ 目录为空，跳过技能知识索引")
+        print("[Skills] skills/ 目录为空，跳过技能知识索引")
         return None
     return build_skill_index(documents=docs)
 
