@@ -1,4 +1,4 @@
-# DataMind Benchmark 使用指南
+# Benchmark 使用指南
 
 ## 概述
 
@@ -6,36 +6,78 @@
 
 - 可配置的并发数
 - 每个请求独立的 Session 隔离（无记忆交叉污染）
+- 实时进度条
 - 自动统计延迟分布（Avg / P50 / P90 / P95 / Max）和吞吐量（QPS）
 - 通过环境变量灵活切换模型、检索策略等配置
 
-## 快速开始
+---
 
-### 1. 准备环境
+## 数据准备
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-# 编辑 .env，填入真实的 API Key
+Benchmark 需要两部分数据：**知识库文档**和**问题集**。
+
+### 1. 知识库文档
+
+知识库的准备方式与正常使用 DataMind 完全一致，参见 [data.md](data.md)。
+
+简单来说：
+- **原始文档**放入 `data/` 目录（方式 A，系统自动分块）
+- **预分块数据**放入 `data/chunks/` 目录（方式 B，JSONL 格式）
+
+```
+data/chunks/my_bench_corpus.jsonl    ← 每行一个 {"text": "...", "metadata": {...}}
 ```
 
-### 2. 准备问题集
+格式与 data.md 中 RAG 方式 B 完全相同：
 
-问题集为 JSONL 格式，每行一个 JSON 对象：
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `text` | string | 是 | chunk 的文本内容 |
+| `metadata` | object | 否 | 任意键值对（来源、章节等） |
 
-```json
+**关于 metadata**：metadata **不参与向量检索的相似度计算**（检索只看 text 的 embedding），但会随检索结果一起传递给 LLM 作为上下文。比如填了 `{"source": "技术文档.md", "chapter": "概述"}`，LLM 在生成回答时就能看到这些来源信息。对于 benchmark 场景，metadata 不影响测评结果，填一个 `source` 方便排查即可，也可以完全不填：
+
+```jsonl
+{"text": "chunk content here..."}
+{"text": "another chunk...", "metadata": {"source": "2wikimultihop"}}
+```
+
+> **注意**：换新的知识库后，必须先清除旧索引：`rm -rf storage/`，首次运行会自动重建。
+
+### 2. 问题集
+
+问题集为 **JSONL 格式**，放在任意位置，运行时通过 `--questions` 参数指定路径。
+
+```
+data/bench_questions.jsonl    ← 每行一个 JSON
+```
+
+**最简格式**（仅测延迟和吞吐）：
+
+```jsonl
 {"question": "RAG的核心原理是什么？"}
 {"question": "张三的工资是多少？"}
 {"question": "代码审查前需要做哪些自查？"}
 ```
 
-可选字段（不影响运行，仅用于后续分析）：
+**带参考答案**（可用于后续准确率评估）：
 
-```json
-{"question": "When did X happen?", "reference_answer": "1982", "question_id": "q_001"}
+```jsonl
+{"question": "When was X born?", "reference_answer": "1982", "question_id": "q_001"}
+{"question": "Who directed film Y?", "reference_answer": "John Doe", "question_id": "q_002"}
 ```
 
-### 3. 运行 Benchmark
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `question` | string | 是 | 问题文本 |
+| `reference_answer` | string | 否 | 标准答案（不影响运行，仅用于事后分析） |
+| `question_id` | string | 否 | 问题 ID（不影响运行，仅用于事后分析） |
+
+如果文件不是 JSON 格式，每行纯文本也会被当作一个问题。
+
+---
+
+## 运行
 
 ```bash
 # 基础用法（默认 5 并发）
@@ -48,13 +90,13 @@ python benchmark.py --questions data/bench_questions.jsonl --concurrency 30
 python benchmark.py --questions data/bench_questions.jsonl --concurrency 50 --output results.json
 ```
 
-### 4. 通过环境变量切换配置
+### 通过环境变量切换配置
 
 ```bash
-# 切换检索模式为 multi-query
+# 切换检索模式
 RETRIEVER_MODE=multi_query python benchmark.py --questions data/bench_questions.jsonl
 
-# 切换 LLM 模型
+# 切换模型
 LLM_MODEL=deepseek-chat python benchmark.py --questions data/bench_questions.jsonl
 
 # 调整检索 top_k
@@ -67,64 +109,9 @@ RETRIEVER_MODE=multi_query SIMILARITY_TOP_K=5 LLM_MODEL=gpt-4o \
 
 所有可用环境变量参见 `.env.example`。
 
-## 使用真实 RAG Benchmark 数据集
+---
 
-以 [A-RAG / 2WikiMultiHop](https://huggingface.co/datasets/Ayanami0730/rag_test) 为例：
-
-### 下载数据
-
-```bash
-pip install huggingface_hub
-python -c "
-from huggingface_hub import hf_hub_download
-for f in ['chunks.json', 'questions.json']:
-    hf_hub_download('Ayanami0730/rag_test', f'2wikimultihop/{f}',
-                    repo_type='dataset', local_dir='data/bench_raw')
-"
-```
-
-### 转换格式
-
-```python
-import json
-
-# 1. chunks → DataMind JSONL 格式
-with open('data/bench_raw/2wikimultihop/chunks.json') as f:
-    raw = json.load(f)
-
-with open('data/chunks/2wiki_chunks.jsonl', 'w') as out:
-    for item in raw:
-        idx = item.index(':')
-        chunk_id, text = item[:idx], item[idx+1:].strip()
-        out.write(json.dumps({
-            'text': text,
-            'metadata': {'source': '2wikimultihop', 'chunk_id': chunk_id}
-        }, ensure_ascii=False) + '\n')
-
-# 2. questions → bench JSONL
-with open('data/bench_raw/2wikimultihop/questions.json') as f:
-    qs = json.load(f)
-
-with open('data/bench_2wiki.jsonl', 'w') as out:
-    for q in qs:
-        out.write(json.dumps({
-            'question': q['question'],
-            'reference_answer': q['answer'],
-            'question_id': q['id'],
-        }, ensure_ascii=False) + '\n')
-```
-
-### 清除旧索引并运行
-
-```bash
-# 清除旧索引（重要：换数据后必须清除）
-rm -rf storage/
-
-# 运行（首次会自动建索引）
-python benchmark.py --questions data/bench_2wiki.jsonl --concurrency 50 --output benchmark_2wiki.json
-```
-
-## 输出格式
+## 输出
 
 ### 终端输出
 
@@ -167,9 +154,75 @@ python benchmark.py --questions data/bench_2wiki.jsonl --concurrency 50 --output
 }
 ```
 
+---
+
+## 使用公开 RAG 数据集
+
+推荐使用 [A-RAG Benchmark](https://huggingface.co/datasets/Ayanami0730/rag_test)，它提供了现成的 chunks 和 questions，只需转为上述格式即可。
+
+### 可用数据集
+
+| 数据集 | Chunks | Questions | 特点 |
+|--------|--------|-----------|------|
+| `2wikimultihop` | 658 | 1,000 | 多跳推理，体积最小，推荐入门 |
+| `hotpotqa` | 1,311 | 1,000 | 多跳推理 |
+| `musique` | 1,354 | 1,000 | 2-4 跳推理 |
+| `medical` | 225 | 2,062 | 医学领域 |
+| `novel` | 1,117 | 2,010 | 长文本文学 |
+
+### 下载
+
+```bash
+pip install huggingface_hub
+python -c "
+from huggingface_hub import hf_hub_download
+for f in ['chunks.json', 'questions.json']:
+    hf_hub_download('Ayanami0730/rag_test', f'2wikimultihop/{f}',
+                    repo_type='dataset', local_dir='data/bench_raw')
+"
+```
+
+### 数据集原始格式
+
+下载后的文件格式如下，需要转换后才能被 DataMind 使用：
+
+**chunks.json** — JSON 数组，每项是 `"id:text"` 格式的字符串：
+
+```json
+["0:teutberga (died 11 november...", "1:##lus the little pfalzgraf..."]
+```
+
+**questions.json** — JSON 数组，每项包含 question 和 answer：
+
+```json
+[{"id": "xxx", "question": "When did X happen?", "answer": "1982", ...}]
+```
+
+### 转换为 DataMind 格式
+
+将 chunks 转为 `data/chunks/*.jsonl`（每行一个 `{"text": "...", "metadata": {...}}`），将 questions 转为 `data/bench_*.jsonl`（每行一个 `{"question": "..."}`）。
+
+具体的转换脚本取决于你的数据集格式和需要的 metadata，这里不做硬性规定。转换后的目录结构应该是：
+
+```
+data/
+├── chunks/
+│   └── 2wiki_chunks.jsonl       ← 知识库 chunks (JSONL)
+└── bench_2wiki.jsonl            ← 问题集 (JSONL)
+```
+
+### 清除旧索引并运行
+
+```bash
+rm -rf storage/
+python benchmark.py --questions data/bench_2wiki.jsonl --concurrency 50 --output benchmark_2wiki.json
+```
+
+---
+
 ## 参考数据
 
-以下为 2WikiMultiHop 数据集（658 chunks, 1000 questions）在 gpt-4o 下的实测结果：
+以下为 2WikiMultiHop 数据集（658 chunks, gpt-4o）在不同并发下的实测结果：
 
 | 并发数 | 问题数 | 错误 | Wall Time | Avg Latency | P50 | P95 | 吞吐量 |
 |--------|--------|------|-----------|-------------|-----|-----|--------|
@@ -177,16 +230,6 @@ python benchmark.py --questions data/bench_2wiki.jsonl --concurrency 50 --output
 | 30 | 20 | 0 | 16.1s | 7.33s | 7.28s | 16.12s | 1.24 QPS |
 | 50 | 1000 | 0 | 168.1s | 8.10s | 7.04s | 15.61s | 5.95 QPS |
 
-准确率（reference answer 包含在回复中）：**36.0%**（单次向量检索 top_k=3，multi-hop 问题天然较难）。
+准确率（reference answer 包含在回复中）：**36.0%**
 
-## 可用数据集
-
-| 数据集 | 来源 | Chunks | Questions | 难度 |
-|--------|------|--------|-----------|------|
-| 2wikimultihop | A-RAG | 658 | 1,000 | 多跳推理 |
-| hotpotqa | A-RAG | 1,311 | 1,000 | 多跳推理 |
-| musique | A-RAG | 1,354 | 1,000 | 2-4 跳推理 |
-| medical | A-RAG | 225 | 2,062 | 医学领域 |
-| novel | A-RAG | 1,117 | 2,010 | 长文本文学 |
-
-均可从 `Ayanami0730/rag_test` 下载，格式相同。
+> 2WikiMultiHop 是多跳推理数据集，单次向量检索 top_k=3 天然较难。可通过 `RETRIEVER_MODE=multi_query` 或增大 `SIMILARITY_TOP_K` 来提升召回率。
