@@ -19,14 +19,16 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import TextNode
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
-import config
+from config import settings
 
-PRE_CHUNKED_DIR = os.path.join(config.DATA_DIR, "chunks")
+PRE_CHUNKED_DIR = os.path.join(settings.data_dir, "chunks")
 
 
-def load_documents(data_dir: str = config.DATA_DIR):
+def load_documents(data_dir: str = None):
     """从 data/ 目录加载所有文档 (支持 PDF, TXT, MD, DOCX 等)
     自动排除 chunks/, triplets/, skills/ 子目录"""
+    if data_dir is None:
+        data_dir = settings.data_dir
     if not os.path.exists(data_dir):
         print(f"[WARNING] data 目录不存在: {data_dir}")
         return []
@@ -97,7 +99,7 @@ def load_pre_chunked(chunks_dir: str = PRE_CHUNKED_DIR):
     return nodes
 
 
-def build_index(documents=None, nodes=None, persist_dir: str = config.STORAGE_DIR):
+def build_index(documents=None, nodes=None, persist_dir: str = None):
     """构建或加载 Chroma 向量索引
 
     Args:
@@ -105,6 +107,8 @@ def build_index(documents=None, nodes=None, persist_dir: str = config.STORAGE_DI
         nodes: 预分块的 TextNode 列表 (方式 B, 跳过分块直接 Embedding)
         persist_dir: 持久化目录
     """
+    if persist_dir is None:
+        persist_dir = settings.storage_dir
     chroma_client = chromadb.PersistentClient(path=persist_dir)
     chroma_collection = chroma_client.get_or_create_collection("rag_allinone")
     vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
@@ -141,7 +145,7 @@ def get_or_create_index():
       2. data/chunks/*.jsonl 预分块数据 -> 跳过分块，直接 Embedding
       3. data/ 目录下的原始文档 -> SentenceSplitter 分块 + Embedding
     """
-    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    chroma_client = chromadb.PersistentClient(path=settings.storage_dir)
     collection = chroma_client.get_or_create_collection("rag_allinone")
 
     if collection.count() > 0:

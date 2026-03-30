@@ -1,42 +1,67 @@
 """
-统一配置: LLM + Embedding + 路径
+统一配置: LLM + Embedding + 路径 + Retriever + Memory
 
-========== 请在这里填入你的 API 信息 ==========
+所有配置项优先从环境变量读取，fallback 到默认值。
+支持 .env 文件自动加载。
+
+环境变量名与字段名一致（大写），例如:
+  LLM_API_BASE=https://api.deepseek.com/v1
+  LLM_MODEL=deepseek-chat
+  RETRIEVER_MODE=multi_query
+
+常见 API 提供商示例:
+  DeepSeek:  llm_api_base="https://api.deepseek.com/v1",  llm_model="deepseek-chat"
+  智谱:      llm_api_base="https://open.bigmodel.cn/api/paas/v4", llm_model="glm-4-flash"
+  月之暗面:   llm_api_base="https://api.moonshot.cn/v1",   llm_model="moonshot-v1-8k"
+  硅基流动:   llm_api_base="https://api.siliconflow.cn/v1", llm_model="deepseek-ai/DeepSeek-V3"
+  OpenAI:    llm_api_base="https://api.openai.com/v1",    llm_model="gpt-4o-mini"
 """
 
 import os
 
-# ---- LLM 配置 (OpenAI 兼容 API) ----
-# 替换为你的 API 地址和密钥
-# 示例:
-#   DeepSeek:  api_base="https://api.deepseek.com/v1",  model="deepseek-chat"
-#   智谱:      api_base="https://open.bigmodel.cn/api/paas/v4", model="glm-4-flash"
-#   月之暗面:   api_base="https://api.moonshot.cn/v1",   model="moonshot-v1-8k"
-#   硅基流动:   api_base="https://api.siliconflow.cn/v1", model="deepseek-ai/DeepSeek-V3"
-#   OpenAI:    api_base="https://api.openai.com/v1",    model="gpt-4o-mini"
+from pydantic_settings import BaseSettings
 
-LLM_API_BASE = "https://api.openai.com/v1"               # <-- 改成你的 API 地址
-LLM_API_KEY = "sk-your-api-key-here"                      # <-- 改成你的 API Key
-LLM_MODEL = "gpt-4o-mini"                                 # <-- 改成你的模型名称
 
-# ---- Embedding 配置 ----
-# 如果你的 API 提供商也支持 embedding，可以用同一个地址
-# 如果不支持，设 USE_LOCAL_EMBEDDING = True 使用本地模型 (CPU 可跑, 免费)
-USE_LOCAL_EMBEDDING = False
+class Settings(BaseSettings):
+    # ---- LLM ----
+    llm_api_base: str = "https://api.openai.com/v1"
+    llm_api_key: str = "sk-your-api-key-here"
+    llm_model: str = "gpt-4o-mini"
 
-EMBEDDING_API_BASE = "https://api.openai.com/v1"          # <-- embedding API 地址 (可与 LLM 相同)
-EMBEDDING_API_KEY = "sk-your-api-key-here"                 # <-- embedding API Key
-EMBEDDING_MODEL = "text-embedding-3-small"                 # <-- embedding 模型名
+    # ---- Embedding ----
+    use_local_embedding: bool = False
+    embedding_api_base: str = "https://api.openai.com/v1"
+    embedding_api_key: str = "sk-your-api-key-here"
+    embedding_model: str = "text-embedding-3-small"
+    local_embedding_model: str = "BAAI/bge-small-zh-v1.5"
 
-# 本地 embedding 备选 (USE_LOCAL_EMBEDDING=True 时生效)
-LOCAL_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"       # 中文小模型, ~100MB, CPU 可跑
+    # ---- Retriever ----
+    retriever_mode: str = "simple"  # "simple" | "multi_query"
+    multi_query_count: int = 3
+    similarity_top_k: int = 3
 
-# ---- 路径配置 ----
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-STORAGE_DIR = os.path.join(BASE_DIR, "storage")
-SKILLS_DIR = os.path.join(DATA_DIR, "skills")
+    # ---- Memory ----
+    memory_token_limit: int = 30000
+    chat_history_token_ratio: float = 0.7
 
-# ---- Memory 配置 ----
-MEMORY_TOKEN_LIMIT = 30000
-CHAT_HISTORY_TOKEN_RATIO = 0.7
+    # ---- Paths (computed from project root, not from env) ----
+    @property
+    def base_dir(self) -> str:
+        return os.path.dirname(os.path.abspath(__file__))
+
+    @property
+    def data_dir(self) -> str:
+        return os.path.join(self.base_dir, "data")
+
+    @property
+    def storage_dir(self) -> str:
+        return os.path.join(self.base_dir, "storage")
+
+    @property
+    def skills_dir(self) -> str:
+        return os.path.join(self.data_dir, "skills")
+
+    model_config = {"env_file": ".env", "extra": "ignore"}
+
+
+settings = Settings()

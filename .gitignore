@@ -7,3 +7,10 @@ __pycache__/
 dist/
 build/
 .venv/
+
+# Benchmark data & results
+data/bench_raw/
+data/bench_2wiki*.jsonl
+data/chunks/2wiki_*.jsonl
+data/chunks/*.bak
+benchmark_*.json

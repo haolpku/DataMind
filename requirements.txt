@@ -5,6 +5,7 @@ llama-index-vector-stores-chroma
 llama-index-readers-file
 chromadb
 python-dotenv
+pydantic-settings
 sqlalchemy
 fastapi
 uvicorn[standard]

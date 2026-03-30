@@ -19,13 +19,15 @@ from llama_index.core import (
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
-import config
+from config import settings
 
 SKILLS_COLLECTION = "skills_knowledge"
 
 
-def load_skill_documents(skills_dir: str = config.SKILLS_DIR):
+def load_skill_documents(skills_dir: str = None):
     """从 data/skills/ 目录加载所有 Markdown 技能文件"""
+    if skills_dir is None:
+        skills_dir = settings.skills_dir
     if not os.path.exists(skills_dir):
         return []
 
@@ -44,8 +46,10 @@ def load_skill_documents(skills_dir: str = config.SKILLS_DIR):
     return documents
 
 
-def build_skill_index(documents=None, persist_dir: str = config.STORAGE_DIR):
+def build_skill_index(documents=None, persist_dir: str = None):
     """构建或加载技能知识的 Chroma 向量索引"""
+    if persist_dir is None:
+        persist_dir = settings.storage_dir
     chroma_client = chromadb.PersistentClient(path=persist_dir)
     chroma_collection = chroma_client.get_or_create_collection(SKILLS_COLLECTION)
     vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
@@ -69,7 +73,7 @@ def build_skill_index(documents=None, persist_dir: str = config.STORAGE_DIR):
 
 def get_or_create_skill_index():
     """如果技能索引已存在则加载，否则从 data/skills/ 构建"""
-    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    chroma_client = chromadb.PersistentClient(path=settings.storage_dir)
     collection = chroma_client.get_or_create_collection(SKILLS_COLLECTION)
 
     if collection.count() > 0:

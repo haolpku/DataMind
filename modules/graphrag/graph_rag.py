@@ -20,10 +20,10 @@ from llama_index.core.indices.property_graph import SimpleLLMPathExtractor
 from llama_index.core.graph_stores import SimplePropertyGraphStore
 from llama_index.core.graph_stores.types import EntityNode, Relation
 
-import config
+from config import settings
 
-GRAPH_STORAGE_DIR = os.path.join(config.STORAGE_DIR, "graph")
-TRIPLETS_DIR = os.path.join(config.DATA_DIR, "triplets")
+GRAPH_STORAGE_DIR = os.path.join(settings.storage_dir, "graph")
+TRIPLETS_DIR = os.path.join(settings.data_dir, "triplets")
 
 
 def load_triplets_from_file(triplets_dir: str = TRIPLETS_DIR):
@@ -111,8 +111,10 @@ def build_graph_from_triplets(entities: dict, relations: list):
     return index
 
 
-def build_graph_index(documents=None, data_dir: str = config.DATA_DIR):
+def build_graph_index(documents=None, data_dir: str = None):
     """从文档构建知识图谱索引（方式 A: LLM 自动抽取实体/关系）"""
+    if data_dir is None:
+        data_dir = settings.data_dir
     if documents is None:
         if not os.path.exists(data_dir) or not os.listdir(data_dir):
             print("[WARNING] data 目录为空，无法构建图索引")

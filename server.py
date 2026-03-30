@@ -20,87 +20,32 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
-import config
-from llama_index.core import Settings
-from llama_index.llms.openai import OpenAI
-from llama_index.embeddings.openai import OpenAIEmbedding
+from config import settings
+from core.bootstrap import initialize, recreate_agent, AppState
+from core.session import SessionManager
 
-from modules.rag.indexer import get_or_create_index, load_documents, load_pre_chunked, build_index
-from modules.graphrag.graph_rag import get_or_create_graph_index, build_graph_index
-from modules.database.database import init_demo_database, create_sql_query_engine, DB_PATH
-from modules.skills.tools import get_all_skills
-from modules.skills.knowledge import get_or_create_skill_index, build_skill_index, load_skill_documents
-from modules.agent.agent import create_agent
+from modules.rag.indexer import load_documents, load_pre_chunked, build_index
+from modules.graphrag.graph_rag import build_graph_index, GRAPH_STORAGE_DIR
+from modules.skills.knowledge import build_skill_index, load_skill_documents
+from modules.database.database import DB_PATH
 from modules.memory.memory import create_memory
 
 import chromadb
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import text, inspect
 
 
-app_state = {}
-
-
-def _recreate_agent():
-    """Helper to recreate agent with current state"""
-    return create_agent(
-        vector_index=app_state.get("vector_index"),
-        graph_index=app_state.get("graph_index"),
-        sql_query_engine=app_state.get("sql_query_engine"),
-        skill_index=app_state.get("skill_index"),
-        extra_tools=app_state.get("skills", []),
-        llm=app_state["llm"],
-    )
+_state: AppState = None  # type: ignore[assignment]
+_session_mgr: SessionManager = None  # type: ignore[assignment]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[INFO] 初始化 DataMind ...")
-
-    llm = OpenAI(api_base=config.LLM_API_BASE, api_key=config.LLM_API_KEY, model=config.LLM_MODEL)
-    if config.USE_LOCAL_EMBEDDING:
-        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-        embed_model = HuggingFaceEmbedding(model_name=config.LOCAL_EMBEDDING_MODEL)
-    else:
-        embed_model = OpenAIEmbedding(
-            api_base=config.EMBEDDING_API_BASE, api_key=config.EMBEDDING_API_KEY,
-            model_name=config.EMBEDDING_MODEL,
-        )
-    Settings.llm = llm
-    Settings.embed_model = embed_model
-
-    app_state["llm"] = llm
-    app_state["vector_index"] = get_or_create_index()
-
-    try:
-        app_state["graph_index"] = get_or_create_graph_index()
-    except Exception as e:
-        print(f"[WARNING] GraphRAG 初始化失败: {e}")
-        app_state["graph_index"] = None
-
-    try:
-        app_state["db_engine"] = init_demo_database()
-        app_state["sql_query_engine"] = create_sql_query_engine(app_state["db_engine"])
-    except Exception as e:
-        print(f"[WARNING] Database 初始化失败: {e}")
-        app_state["db_engine"] = None
-        app_state["sql_query_engine"] = None
-
-    app_state["skills"] = get_all_skills()
-
-    try:
-        app_state["skill_index"] = get_or_create_skill_index()
-    except Exception as e:
-        print(f"[WARNING] 知识型 Skills 初始化失败: {e}")
-        app_state["skill_index"] = None
-
-    app_state["agent"] = _recreate_agent()
-    app_state["memory"] = create_memory()
-
-    print("[INFO] DataMind 初始化完成")
+    global _state, _session_mgr
+    _state = initialize()
+    _session_mgr = SessionManager()
     yield
     print("[INFO] DataMind 关闭")
 
@@ -122,8 +67,8 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    agent = app_state["agent"]
-    memory = app_state["memory"]
+    agent = _state.agent
+    memory = _session_mgr.get_memory(req.session_id)
 
     async def event_stream():
         try:
@@ -148,7 +93,7 @@ async def chat(req: ChatRequest):
 # ============================================================
 @app.get("/api/skills")
 async def list_skills():
-    skills = app_state.get("skills", [])
+    skills = _state.skills or []
     result = []
     for tool in skills:
         meta = tool.metadata
@@ -165,7 +110,7 @@ async def list_skills():
 # ============================================================
 @app.get("/api/skills/knowledge")
 async def list_knowledge_skills():
-    skills_dir = config.SKILLS_DIR
+    skills_dir = settings.skills_dir
     files = []
     if os.path.exists(skills_dir):
         for f in os.listdir(skills_dir):
@@ -177,7 +122,7 @@ async def list_knowledge_skills():
                 first_line = content.split("\n")[0].strip().lstrip("# ") if content else ""
                 files.append({"name": f, "size": size, "title": first_line})
 
-    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    chroma_client = chromadb.PersistentClient(path=settings.storage_dir)
     try:
         collection = chroma_client.get_or_create_collection("skills_knowledge")
         vector_count = collection.count()
@@ -191,8 +136,8 @@ async def list_knowledge_skills():
 async def upload_knowledge_skill(file: UploadFile = File(...)):
     if not file.filename.endswith(".md"):
         raise HTTPException(400, "只支持 .md 格式的技能文件")
-    os.makedirs(config.SKILLS_DIR, exist_ok=True)
-    filepath = os.path.join(config.SKILLS_DIR, file.filename)
+    os.makedirs(settings.skills_dir, exist_ok=True)
+    filepath = os.path.join(settings.skills_dir, file.filename)
     content = await file.read()
     with open(filepath, "wb") as f:
         f.write(content)
@@ -201,7 +146,7 @@ async def upload_knowledge_skill(file: UploadFile = File(...)):
 
 @app.delete("/api/skills/knowledge/{filename}")
 async def delete_knowledge_skill(filename: str):
-    filepath = os.path.join(config.SKILLS_DIR, filename)
+    filepath = os.path.join(settings.skills_dir, filename)
     if not os.path.exists(filepath):
         raise HTTPException(404, "文件不存在")
     os.remove(filepath)
@@ -210,7 +155,7 @@ async def delete_knowledge_skill(filename: str):
 
 @app.post("/api/skills/knowledge/rebuild")
 async def rebuild_knowledge_skills():
-    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    chroma_client = chromadb.PersistentClient(path=settings.storage_dir)
     try:
         chroma_client.delete_collection("skills_knowledge")
     except Exception:
@@ -218,13 +163,13 @@ async def rebuild_knowledge_skills():
 
     docs = load_skill_documents()
     if not docs:
-        app_state["skill_index"] = None
-        app_state["agent"] = _recreate_agent()
+        _state.skill_index = None
+        recreate_agent(_state)
         return {"status": "ok", "message": "无技能文件，已清空索引"}
 
     skill_index = build_skill_index(documents=docs)
-    app_state["skill_index"] = skill_index
-    app_state["agent"] = _recreate_agent()
+    _state.skill_index = skill_index
+    recreate_agent(_state)
     return {"status": "ok", "message": f"技能知识索引重建完成 ({len(docs)} 个文档)"}
 
 
@@ -232,10 +177,8 @@ async def rebuild_knowledge_skills():
 # Memory API
 # ============================================================
 @app.get("/api/memory")
-async def get_memory():
-    memory = app_state.get("memory")
-    if not memory:
-        return {"chat_history": [], "summary": ""}
+async def get_memory(session_id: str = "default"):
+    memory = _session_mgr.get_memory(session_id)
     try:
         messages = await memory.aget()
         chat_history = []
@@ -250,9 +193,12 @@ async def get_memory():
 
 
 @app.delete("/api/memory")
-async def clear_memory():
-    app_state["memory"] = create_memory()
-    return {"status": "ok", "message": "记忆已清空"}
+async def clear_memory(session_id: Optional[str] = None):
+    if session_id:
+        _session_mgr.clear(session_id)
+        return {"status": "ok", "message": f"已清空 session {session_id} 的记忆"}
+    _session_mgr.clear_all()
+    return {"status": "ok", "message": "已清空所有 session 的记忆"}
 
 
 # ============================================================
@@ -261,20 +207,21 @@ async def clear_memory():
 @app.get("/api/rag/documents")
 async def list_documents():
     files = []
-    if os.path.exists(config.DATA_DIR):
+    data_dir = settings.data_dir
+    if os.path.exists(data_dir):
         exclude_dirs = {"chunks", "triplets", "skills"}
-        for root, dirs, filenames in os.walk(config.DATA_DIR):
-            rel_root = os.path.relpath(root, config.DATA_DIR)
+        for root, dirs, filenames in os.walk(data_dir):
+            rel_root = os.path.relpath(root, data_dir)
             top_dir = rel_root.split(os.sep)[0] if rel_root != "." else ""
             if top_dir in exclude_dirs:
                 continue
             for f in filenames:
                 filepath = os.path.join(root, f)
-                relpath = os.path.relpath(filepath, config.DATA_DIR)
+                relpath = os.path.relpath(filepath, data_dir)
                 size = os.path.getsize(filepath)
                 files.append({"name": relpath, "size": size, "path": filepath})
 
-    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    chroma_client = chromadb.PersistentClient(path=settings.storage_dir)
     collection = chroma_client.get_or_create_collection("rag_allinone")
     vector_count = collection.count()
 
@@ -283,8 +230,8 @@ async def list_documents():
 
 @app.post("/api/rag/upload")
 async def upload_document(file: UploadFile = File(...)):
-    os.makedirs(config.DATA_DIR, exist_ok=True)
-    filepath = os.path.join(config.DATA_DIR, file.filename)
+    os.makedirs(settings.data_dir, exist_ok=True)
+    filepath = os.path.join(settings.data_dir, file.filename)
     content = await file.read()
     with open(filepath, "wb") as f:
         f.write(content)
@@ -293,7 +240,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 @app.delete("/api/rag/documents/{filename}")
 async def delete_document(filename: str):
-    filepath = os.path.join(config.DATA_DIR, filename)
+    filepath = os.path.join(settings.data_dir, filename)
     if not os.path.exists(filepath):
         raise HTTPException(404, "文件不存在")
     os.remove(filepath)
@@ -302,7 +249,7 @@ async def delete_document(filename: str):
 
 @app.post("/api/rag/rebuild")
 async def rebuild_rag_index():
-    chroma_client = chromadb.PersistentClient(path=config.STORAGE_DIR)
+    chroma_client = chromadb.PersistentClient(path=settings.storage_dir)
     try:
         chroma_client.delete_collection("rag_allinone")
     except Exception:
@@ -319,8 +266,8 @@ async def rebuild_rag_index():
         index = build_index(documents=docs)
         mode = "文档分块"
 
-    app_state["vector_index"] = index
-    app_state["agent"] = _recreate_agent()
+    _state.vector_index = index
+    recreate_agent(_state)
     return {"status": "ok", "message": f"RAG 索引重建完成 (模式: {mode})"}
 
 
@@ -329,7 +276,7 @@ async def rebuild_rag_index():
 # ============================================================
 @app.get("/api/graphrag/status")
 async def graphrag_status():
-    graph_index = app_state.get("graph_index")
+    graph_index = _state.graph_index
     if graph_index is None:
         return {"status": "not_loaded", "entities": [], "relations": []}
 
@@ -361,12 +308,11 @@ async def graphrag_status():
 async def rebuild_graph_index():
     try:
         import shutil
-        from modules.graphrag.graph_rag import GRAPH_STORAGE_DIR
         if os.path.exists(GRAPH_STORAGE_DIR):
             shutil.rmtree(GRAPH_STORAGE_DIR)
         graph_index = build_graph_index()
-        app_state["graph_index"] = graph_index
-        app_state["agent"] = _recreate_agent()
+        _state.graph_index = graph_index
+        recreate_agent(_state)
         return {"status": "ok", "message": "GraphRAG 重建完成"}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -377,7 +323,7 @@ async def rebuild_graph_index():
 # ============================================================
 @app.get("/api/database/tables")
 async def list_tables():
-    engine = app_state.get("db_engine")
+    engine = _state.db_engine
     if not engine:
         return {"tables": []}
 
@@ -398,7 +344,7 @@ async def list_tables():
 
 @app.get("/api/database/query")
 async def query_table(table: str, limit: int = 50):
-    engine = app_state.get("db_engine")
+    engine = _state.db_engine
     if not engine:
         raise HTTPException(500, "数据库未初始化")
 

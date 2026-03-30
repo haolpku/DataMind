@@ -13,14 +13,14 @@ from sqlalchemy import create_engine, MetaData, Table, Column, String, Integer, 
 from llama_index.core import SQLDatabase
 from llama_index.core.query_engine import NLSQLTableQueryEngine
 
-import config
+from config import settings
 
-DB_PATH = os.path.join(config.STORAGE_DIR, "demo.db")
+DB_PATH = os.path.join(settings.storage_dir, "demo.db")
 
 
 def init_demo_database():
     """创建并填充示例数据库"""
-    os.makedirs(config.STORAGE_DIR, exist_ok=True)
+    os.makedirs(settings.storage_dir, exist_ok=True)
     engine = create_engine(f"sqlite:///{DB_PATH}")
     metadata = MetaData()
 

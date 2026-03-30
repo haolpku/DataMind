@@ -12,9 +12,11 @@ FunctionAgent 根据用户问题自动选择工具:
 
 from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.tools import QueryEngineTool
+from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core import VectorStoreIndex
 
-from modules.rag.retriever import create_query_engine
+from config import settings
+from modules.rag.retriever import create_retriever_by_config
 
 
 SYSTEM_PROMPT = """\
@@ -63,7 +65,10 @@ def create_agent(
     tools = []
 
     if vector_index is not None:
-        query_engine = create_query_engine(vector_index)
+        retriever = create_retriever_by_config(vector_index, settings, llm)
+        query_engine = RetrieverQueryEngine.from_args(
+            retriever=retriever, llm=llm, response_mode="compact",
+        )
         rag_tool = QueryEngineTool.from_defaults(
             query_engine=query_engine,
             name="knowledge_search",

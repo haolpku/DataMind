@@ -7,14 +7,14 @@
 
 from llama_index.core.memory import Memory
 
-import config
+from config import settings
 
 
 def create_memory(session_id: str = "default") -> Memory:
     """创建带短期+长期记忆的 Memory 实例"""
     memory = Memory.from_defaults(
         session_id=session_id,
-        token_limit=config.MEMORY_TOKEN_LIMIT,
-        chat_history_token_ratio=config.CHAT_HISTORY_TOKEN_RATIO,
+        token_limit=settings.memory_token_limit,
+        chat_history_token_ratio=settings.chat_history_token_ratio,
     )
     return memory
