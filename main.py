@@ -25,7 +25,7 @@ from core.bootstrap import initialize
 from modules.memory.memory import create_memory
 
 
-async def chat_loop(agent, memory):
+async def chat_loop(agent, memory, state=None):
     """交互式对话循环"""
     print("\n" + "=" * 60)
     print("  DataMind 智能助手")
@@ -56,8 +56,15 @@ async def chat_loop(agent, memory):
             continue
 
         try:
+            if state is not None:
+                state.last_retrieved_images = []
             response = await agent.run(user_input, memory=memory)
             print(f"\nAssistant: {response}\n")
+            if state and state.last_retrieved_images:
+                print(f"[图片] 检索到 {len(state.last_retrieved_images)} 张相关图片:")
+                for p in state.last_retrieved_images:
+                    print(f"  - {p}")
+                print()
         except Exception as e:
             print(f"\n[ERROR] {e}\n")
             print("提示: 请检查 .env 中的 API 配置是否正确\n")
@@ -66,7 +73,7 @@ async def chat_loop(agent, memory):
 def main():
     state = initialize()
     memory = create_memory()
-    asyncio.run(chat_loop(state.agent, memory))
+    asyncio.run(chat_loop(state.agent, memory, state))
 
 
 if __name__ == "__main__":

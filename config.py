@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     memory_token_limit: int = 30000
     chat_history_token_ratio: float = 0.7
 
+    # ---- Multi-Modal ----
+    image_embedding_mode: str = "disabled"  # "disabled" | "clip" | "vlm_describe"
+    clip_model: str = "openai/clip-vit-base-patch32"
+    vlm_model: str = ""  # 为空时复用 llm_model (需支持 vision)
+    use_multimodal_llm: bool = False
+    image_similarity_top_k: int = 2
+
     # ---- Data Profile ----
     data_profile: str = "default"
 

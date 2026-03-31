@@ -1,8 +1,11 @@
 """
 DataMind 数据契约 — 定义预处理仓库与 DataMind 之间的标准数据格式。
 
-所有字段标注 "多模态预留" 的，当前不被 DataMind 消费，
-但预处理仓库可以提前输出，DataMind 后续版本会逐步支持。
+RAGChunk 的多模态字段 (image_path, image_description, modality) 已被
+DataMind 原生支持，通过 IMAGE_EMBEDDING_MODE 配置项启用。
+
+GraphTriple 的 subject_properties / object_properties 为多模态预留，
+当前仅存储为 EntityNode.properties，后续版本会进一步消费。
 """
 
 from __future__ import annotations
@@ -25,16 +28,18 @@ class RAGChunk(BaseModel):
     必填字段:
         text — chunk 文本内容（纯文本模式）。当 modality 为 image 时可为空。
 
-    多模态预留:
-        image_path — 图片文件相对路径，供多模态 embedding / VLM 使用。
-        modality   — 标注该 chunk 的模态类型。
+    多模态字段:
+        image_path        — 图片文件相对路径，供 CLIP embedding / VLM 使用。
+        image_description — VLM 生成的图片文字描述（vlm_describe 模式使用，
+                            预处理仓库可以预先填好，也可由 DataMind 入库时生成）。
+        modality          — 标注该 chunk 的模态类型。
     """
 
     text: str = ""
     metadata: dict = Field(default_factory=dict)
 
-    # 多模态预留
     image_path: str | None = None
+    image_description: str | None = None
     modality: Modality = Modality.TEXT
 
     model_config = {"extra": "ignore"}

@@ -10,7 +10,7 @@ build/
 
 # Benchmark data & results
 data/bench_raw/
-data/bench/2wiki*.jsonl
+data/bench/
 data/profiles/2wiki*/
 benchmark_*.json
 *_eval.json

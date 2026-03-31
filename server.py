@@ -72,6 +72,7 @@ async def chat(req: ChatRequest):
 
     async def event_stream():
         try:
+            _state.last_retrieved_images = []
             handler = agent.run(req.message, memory=memory)
             response = await handler
             response_text = str(response)
@@ -80,6 +81,14 @@ async def chat(req: ChatRequest):
                 chunk = response_text[i:i+4]
                 yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(0.02)
+
+            if _state.last_retrieved_images:
+                profile = settings.data_profile
+                urls = [
+                    f"/api/images/{profile}/{p}"
+                    for p in _state.last_retrieved_images
+                ]
+                yield f"data: {json.dumps({'type': 'images', 'urls': urls}, ensure_ascii=False)}\n\n"
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
@@ -362,11 +371,34 @@ async def query_table(table: str, limit: int = 50):
 
 
 # ============================================================
+# Image serving (profile 图片文件)
+# ============================================================
+_ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+
+
+@app.get("/api/images/{profile}/{path:path}")
+async def serve_image(profile: str, path: str):
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "profiles")
+    full_path = os.path.normpath(os.path.join(base_dir, profile, path))
+    if not full_path.startswith(os.path.normpath(base_dir)):
+        raise HTTPException(403, "路径非法")
+    ext = os.path.splitext(full_path)[1].lower()
+    if ext not in _ALLOWED_IMAGE_EXTS:
+        raise HTTPException(400, f"不支持的文件类型: {ext}")
+    if not os.path.isfile(full_path):
+        raise HTTPException(404, "图片不存在")
+    return FileResponse(full_path)
+
+
+# ============================================================
 # 前端页面
 # ============================================================
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(static_dir, "index.html"))
+    return FileResponse(
+        os.path.join(static_dir, "index.html"),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 if __name__ == "__main__":

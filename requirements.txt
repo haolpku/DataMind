@@ -10,3 +10,7 @@ sqlalchemy
 fastapi
 uvicorn[standard]
 python-multipart
+
+# ---- Multi-Modal (按需安装) ----
+llama-index-multi-modal-llms-openai
+llama-index-embeddings-clip

@@ -6,15 +6,23 @@
 
 通过 create_retriever_by_config() 工厂函数根据配置选择策略。
 保留 create_query_engine() 用于向后兼容。
+
+多模态索引 (MultiModalVectorStoreIndex) 的 as_retriever() 额外接受
+image_similarity_top_k 参数，由工厂函数自动处理。
 """
+
+from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from typing import Union
 
 from llama_index.core import VectorStoreIndex
 from llama_index.core.schema import NodeWithScore
 
 from config import settings
+
+AnyIndex = Union[VectorStoreIndex, "MultiModalVectorStoreIndex"]
 
 
 class BaseRetriever(ABC):
@@ -26,8 +34,11 @@ class BaseRetriever(ABC):
 class SimpleRetriever(BaseRetriever):
     """单 query 直接向量检索（等同于原有行为）"""
 
-    def __init__(self, index: VectorStoreIndex, similarity_top_k: int = 3):
-        self._retriever = index.as_retriever(similarity_top_k=similarity_top_k)
+    def __init__(self, index: AnyIndex, similarity_top_k: int = 3, image_similarity_top_k: int = 0):
+        kwargs: dict = {"similarity_top_k": similarity_top_k}
+        if image_similarity_top_k > 0 and _is_multimodal_index(index):
+            kwargs["image_similarity_top_k"] = image_similarity_top_k
+        self._retriever = index.as_retriever(**kwargs)
 
     async def aretrieve(self, query: str) -> list[NodeWithScore]:
         return await self._retriever.aretrieve(query)
@@ -46,15 +57,17 @@ class MultiQueryRetriever(BaseRetriever):
 
     def __init__(
         self,
-        index: VectorStoreIndex,
+        index: AnyIndex,
         llm,
         num_queries: int = 3,
         similarity_top_k: int = 3,
+        image_similarity_top_k: int = 0,
     ):
         self._index = index
         self._llm = llm
         self._num_queries = num_queries
         self._top_k = similarity_top_k
+        self._img_top_k = image_similarity_top_k
 
     async def _generate_sub_queries(self, query: str) -> list[str]:
         prompt = MULTI_QUERY_PROMPT.format(num=self._num_queries, query=query)
@@ -81,31 +94,44 @@ class MultiQueryRetriever(BaseRetriever):
         if not sub_queries:
             sub_queries = [query]
 
-        retriever = self._index.as_retriever(similarity_top_k=self._top_k)
+        kwargs: dict = {"similarity_top_k": self._top_k}
+        if self._img_top_k > 0 and _is_multimodal_index(self._index):
+            kwargs["image_similarity_top_k"] = self._img_top_k
+        retriever = self._index.as_retriever(**kwargs)
         tasks = [retriever.aretrieve(q) for q in sub_queries]
         all_results = await asyncio.gather(*tasks)
 
         return self._merge_results(all_results)
 
 
+def _is_multimodal_index(index) -> bool:
+    """检查索引是否为 MultiModalVectorStoreIndex。"""
+    cls_name = type(index).__name__
+    return cls_name == "MultiModalVectorStoreIndex"
+
+
 def create_retriever_by_config(
-    index: VectorStoreIndex,
+    index: AnyIndex,
     cfg=None,
     llm=None,
 ) -> BaseRetriever:
     """工厂函数: 根据配置选择检索策略"""
     if cfg is None:
         cfg = settings
+
+    img_top_k = getattr(cfg, "image_similarity_top_k", 0) if _is_multimodal_index(index) else 0
+
     if cfg.retriever_mode == "multi_query" and llm is not None:
         return MultiQueryRetriever(
-            index, llm, cfg.multi_query_count, cfg.similarity_top_k
+            index, llm, cfg.multi_query_count, cfg.similarity_top_k,
+            image_similarity_top_k=img_top_k,
         )
-    return SimpleRetriever(index, cfg.similarity_top_k)
+    return SimpleRetriever(index, cfg.similarity_top_k, image_similarity_top_k=img_top_k)
 
 
 # ---- 向后兼容 ----
 
-def create_query_engine(index: VectorStoreIndex, similarity_top_k: int = 3):
+def create_query_engine(index: AnyIndex, similarity_top_k: int = 3):
     """创建检索问答引擎（保留用于向后兼容）"""
     return index.as_query_engine(
         similarity_top_k=similarity_top_k,
@@ -113,6 +139,6 @@ def create_query_engine(index: VectorStoreIndex, similarity_top_k: int = 3):
     )
 
 
-def create_retriever(index: VectorStoreIndex, similarity_top_k: int = 5):
+def create_retriever(index: AnyIndex, similarity_top_k: int = 5):
     """创建检索器 (仅返回相关片段，不生成回答)"""
     return index.as_retriever(similarity_top_k=similarity_top_k)
