@@ -9,6 +9,7 @@
   LLM_MODEL=deepseek-chat
   RETRIEVER_MODE=multi_query
   DATA_PROFILE=2wiki_chunk512
+  ENABLE_GRAPHRAG=false   # 小内存环境可关闭，跳过加载图谱索引
 
 常见 API 提供商示例:
   DeepSeek:  llm_api_base="https://api.deepseek.com/v1",  llm_model="deepseek-chat"
@@ -25,21 +26,21 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # ---- LLM ----
-    llm_api_base: str = "https://api.openai.com/v1"
-    llm_api_key: str = "sk-your-api-key-here"
+    llm_api_base: str = ""
+    llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
 
     # ---- Embedding ----
     use_local_embedding: bool = False
-    embedding_api_base: str = "https://api.openai.com/v1"
-    embedding_api_key: str = "sk-your-api-key-here"
+    embedding_api_base: str = ""
+    embedding_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
     local_embedding_model: str = "BAAI/bge-small-zh-v1.5"
 
     # ---- Retriever ----
     retriever_mode: str = "simple"  # "simple" | "multi_query"
     multi_query_count: int = 3
-    similarity_top_k: int = 3
+    similarity_top_k: int = 10
 
     # ---- Memory ----
     memory_token_limit: int = 30000
@@ -51,6 +52,10 @@ class Settings(BaseSettings):
     vlm_model: str = ""  # 为空时复用 llm_model (需支持 vision)
     use_multimodal_llm: bool = False
     image_similarity_top_k: int = 2
+
+    # ---- GraphRAG ----
+    # 设为 false 时不加载/构建 PropertyGraph 索引，仅向量 RAG + 其它工具（省内存）
+    enable_graphrag: bool = True
 
     # ---- Data Profile ----
     data_profile: str = "default"

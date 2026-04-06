@@ -143,13 +143,17 @@ def initialize(cfg: Settings = None) -> AppState:
         image_embed_model=state.image_embed_model,
     )
 
-    # 3. GraphRAG 图谱索引
-    print("\n[INFO] === 加载 GraphRAG 图谱索引 ===")
-    try:
-        state.graph_index = get_or_create_graph_index()
-    except Exception as e:
-        print(f"[WARNING] GraphRAG 初始化失败: {e}")
-        print("[WARNING] 将跳过 GraphRAG，其余功能正常使用")
+    # 3. GraphRAG 图谱索引（可通过 ENABLE_GRAPHRAG=false 关闭）
+    if cfg.enable_graphrag:
+        print("\n[INFO] === 加载 GraphRAG 图谱索引 ===")
+        try:
+            state.graph_index = get_or_create_graph_index()
+        except Exception as e:
+            print(f"[WARNING] GraphRAG 初始化失败: {e}")
+            print("[WARNING] 将跳过 GraphRAG，其余功能正常使用")
+    else:
+        print("\n[INFO] === GraphRAG 已禁用 (enable_graphrag=False)，跳过图谱索引 ===")
+        state.graph_index = None
 
     # 4. Database
     print("\n[INFO] === 初始化 Database ===")
