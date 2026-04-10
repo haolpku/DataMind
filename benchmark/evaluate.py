@@ -12,7 +12,7 @@ Benchmark 评估脚本 —— 对比生成答案与标准答案
 可选:
   --golden  额外计算 golden 指标:
             - semantic_similarity (embedding cosine similarity)
-            - factual_correctness_f1 (claim-based NLI)
+            - factual_correctness (claim-based NLI: precision/recall/f1)
 """
 
 import argparse
@@ -126,7 +126,9 @@ def evaluate(results: list[dict], include_golden: bool = False) -> dict:
     em_correct = 0
     f1_sum = 0.0
     semantic_sum = 0.0
-    factual_sum = 0.0
+    factual_f1_sum = 0.0
+    factual_precision_sum = 0.0
+    factual_recall_sum = 0.0
     total = 0
 
     for r in results:
@@ -153,11 +155,18 @@ def evaluate(results: list[dict], include_golden: bool = False) -> dict:
 
         if include_golden and semantic_metric is not None and factual_metric is not None:
             semantic = float(semantic_metric.compute(r["question"], answer, ref).get("semantic_similarity", 0.0))
-            factual_f1 = float(factual_metric.compute(r["question"], answer, ref).get("factual_correctness_f1", 0.0))
+            factual = factual_metric.compute(r["question"], answer, ref)
+            factual_precision = float(factual.get("factual_correctness_precision", 0.0))
+            factual_recall = float(factual.get("factual_correctness_recall", 0.0))
+            factual_f1 = float(factual.get("factual_correctness_f1", 0.0))
             item["semantic_similarity"] = round(semantic, 6)
+            item["factual_correctness_precision"] = round(factual_precision, 6)
+            item["factual_correctness_recall"] = round(factual_recall, 6)
             item["factual_correctness_f1"] = round(factual_f1, 6)
             semantic_sum += semantic
-            factual_sum += factual_f1
+            factual_precision_sum += factual_precision
+            factual_recall_sum += factual_recall
+            factual_f1_sum += factual_f1
 
         evaluated.append(item)
 
@@ -169,7 +178,9 @@ def evaluate(results: list[dict], include_golden: bool = False) -> dict:
     }
     if include_golden:
         summary["semantic_similarity_avg"] = round(semantic_sum / total, 6) if total else 0.0
-        summary["factual_correctness_f1_avg"] = round(factual_sum / total, 6) if total else 0.0
+        summary["factual_correctness_precision_avg"] = round(factual_precision_sum / total, 6) if total else 0.0
+        summary["factual_correctness_recall_avg"] = round(factual_recall_sum / total, 6) if total else 0.0
+        summary["factual_correctness_f1_avg"] = round(factual_f1_sum / total, 6) if total else 0.0
     return {"summary": summary, "details": evaluated}
 
 
@@ -185,6 +196,10 @@ def _print_report(report: dict):
         print(f"  Semantic Sim:      {s['semantic_similarity_avg']:.6f}")
     if "factual_correctness_f1_avg" in s:
         print(f"  Factual F1:        {s['factual_correctness_f1_avg']:.6f}")
+    if "factual_correctness_precision_avg" in s:
+        print(f"  Factual Precision: {s['factual_correctness_precision_avg']:.6f}")
+    if "factual_correctness_recall_avg" in s:
+        print(f"  Factual Recall:    {s['factual_correctness_recall_avg']:.6f}")
     print("=" * 55)
 
     details = report["details"]
