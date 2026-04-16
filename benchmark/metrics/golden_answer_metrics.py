@@ -4,7 +4,7 @@ Implements golden answer metrics:
 - Semantic Similarity: Direct embedding similarity
 - Factual Correctness: Claim-based NLI with precision/recall/F1
 """
-from abc import ABC, abstractmethod
+
 from typing import Any, Dict, List
 from enum import Enum
 import logging
@@ -12,39 +12,12 @@ import logging
 import numpy as np
 from pydantic import BaseModel
 
-from benchmark.models.embedding_models import EmbeddingModel
-from benchmark.models.llm_judges import LLMJudgeModel
+from open_rag_eval.metrics.base_metrics import GoldenAnswerMetric
+from open_rag_eval.models.embedding_models import EmbeddingModel
+from open_rag_eval.models.llm_judges import LLMJudgeModel
 
 
 logger = logging.getLogger(__name__)
-
-class GoldenAnswerMetric(ABC):
-    """Base class for metrics that compare generated answers to golden/reference answers."""
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Return the metric name."""
-        pass
-
-    @abstractmethod
-    def compute(
-        self,
-        query: str,
-        generated_answer: str,
-        expected_answer: str
-    ) -> Dict[str, float]:
-        """Compute metric score comparing generated to expected answer.
-
-        Args:
-            query: The original query
-            generated_answer: The RAG-generated answer
-            expected_answer: The golden/reference answer
-
-        Returns:
-            Dictionary with metric scores
-        """
-        pass
 
 
 # ============ Utility Functions ============
