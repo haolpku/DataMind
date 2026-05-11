@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datamind"
+version = "0.2.0"
+description = "Unified retrieval agent: KB / Graph / DB / Skills / Memory behind one Claude-powered loop."
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = [
+    # Model client — we drive the agent loop ourselves via the Anthropic
+    # Messages API (/v1/messages). This keeps us decoupled from the `claude`
+    # CLI, which on some installs is a vendor-rebranded binary that ignores
+    # ANTHROPIC_API_KEY.
+    "anthropic>=0.40",
+    "httpx[http2]>=0.27",
+
+    # Config / validation / logging primitives
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+
+    # KB
+    "chromadb>=1.0",
+    "rank-bm25>=0.2",
+
+    # Graph
+    "networkx>=3.0",
+
+    # DB abstraction (dialect providers pluggable)
+    "sqlalchemy>=2.0",
+
+    # Server + CLI
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "typer>=0.12",
+    "rich>=13",
+
+    # Async primitives
+    "anyio>=4.2",
+]
+
+[project.optional-dependencies]
+# Legacy v0.1 stack — kept so the old main.py / server.py / modules/* keep
+# working side-by-side with the new datamind/ package.
+legacy = [
+    "llama-index>=0.11",
+]
+
+# Dialect / provider extras — installed on demand, no hard requirement
+mysql = ["pymysql>=1.1", "cryptography>=42"]
+postgres = ["psycopg[binary]>=3.1"]
+voyage = ["voyageai>=0.2"]
+huggingface = ["sentence-transformers>=2.5"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+datamind = "datamind.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["datamind*"]
+exclude = ["modules*", "core*", "benchmark*", "schema*", "tests*", "data*", "storage*", "static*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["datamind/tests"]

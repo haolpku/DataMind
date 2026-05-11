@@ -2,6 +2,7 @@ storage/
 __pycache__/
 *.pyc
 .env
+.env.datamind
 .DS_Store
 *.egg-info/
 dist/
@@ -14,3 +15,10 @@ data/bench/
 data/profiles/2wiki*/
 benchmark_*.json
 *_eval.json
+
+# Per-profile generated data (uploads, hello_* sandboxes, enterprise_demo
+# seed). Profiles are reproducible via scripts; their working state isn't
+# something we want in git.
+data/profiles/hello_*/
+data/profiles/enterprise_demo/
+data/profiles/*/uploads/

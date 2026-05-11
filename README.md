@@ -1,127 +1,157 @@
 # DataMind
 
-基于 LlamaIndex 的一体化智能助手，集成五大模块：
+An agentic retrieval assistant that pulls from **six** distinct knowledge surfaces and **picks the right tool itself**. Talk to it through a CLI or a browser UI; drag a file in and it'll route it into the right backend automatically.
 
-- **RAG** — 向量语义检索（Chroma），支持多模态（CLIP / VLM 文本化）
-- **GraphRAG** — 知识图谱检索（NetworkX）
-- **Database** — 自然语言查数据库（SQLite NL2SQL）
-- **Skills** — 自定义工具/技能（FunctionTool）
-- **Memory** — 对话记忆（短期 + 长期）
-
-Agent 会根据用户问题**自动选择**使用哪个工具，无需手动指定。
-
-支持两种使用方式：**Web 界面**（带可视化管理面板）和**终端命令行**。
-
-> 完整文档请访问 **[DataMind-Doc](https://haolpku.github.io/DataMind-Doc/zh/)** — 包含各模块详细说明、数据格式规范、演示指南和 Benchmark 使用指南。
+> **v0.2 is the current focus.** v0.1 (LlamaIndex `FunctionAgent` in `main.py` / `server.py` / `modules/`) still works for comparison. New code lives under [`datamind/`](./datamind/). For an end-to-end walkthrough see [`GETTING_STARTED.md`](./GETTING_STARTED.md) or the [docs site](https://haolpku.github.io/DataMind-Doc/en/).
 
 ---
 
-## 快速开始
+## Capabilities
 
-```bash
-# 1. 创建并激活环境
-conda create -n datamind python=3.12
-conda activate datamind
+| Capability | Backend | Tools the agent gets |
+|---|---|---|
+| **KB (RAG)** | Chroma + BM25 with Reciprocal Rank Fusion | `kb_search`, `kb_list_documents`, `kb_count`, `kb_reindex` |
+| **Graph** | NetworkX, JSON-persisted | `graph_search_entities`, `graph_traverse`, `graph_neighbors`, `graph_upsert_triples` |
+| **Database** | SQLAlchemy (SQLite / MySQL / Postgres) | `db_list_tables`, `db_describe_table`, `db_query_sql`, `db_query_nl` |
+| **Skills** | `.claude/skills/<name>/SKILL.md` + safe Python tools | `skill_search`, `skill_get`, `skill_list`, `calculator`, `unit_convert`, `get_current_time`, `analyze_text` |
+| **Memory** | SQLite with cosine recall + LLM fact extraction | `memory_save`, `memory_recall`, `memory_forget`, `memory_list_namespaces` |
+| **Ingest** ✨ | Conversational data import — drop a file in via chat or the browser drag-drop zone | `kb_add_file`, `kb_add_path`, `db_import_csv`, `graph_add_triples_from_text` |
 
-# 2. 安装依赖
-pip install -r requirements.txt
-
-# 3. 配置 API Key
-cp .env.example .env
-# 编辑 .env，填入你的 API Key 和 API Base
-
-# 4. 将文档放入 data/profiles/default/ 目录
-```
-
-### Web 界面（推荐）
-
-```bash
-python server.py
-```
-
-打开浏览器访问 **http://localhost:8000**。左侧为流式对话，右侧面板可管理 RAG / GraphRAG / Database / Skills / Memory。
-
-### 终端命令行
-
-```bash
-python main.py
-```
-
-首次运行会自动构建向量索引和知识图谱（需要调用 API），后续启动直接加载已有索引。
+**27 tools total.** All routed through one `ToolRegistry`; the agent decides what to call and in what order.
 
 ---
 
-## 各模块简介
-
-| 模块 | 功能 | 详细文档 |
-|------|------|---------|
-| **RAG** | 文档向量化 + 语义检索，支持多模态 (CLIP / VLM) | [RAG 文档](https://haolpku.github.io/DataMind-Doc/zh/) |
-| **GraphRAG** | 知识图谱实体关系检索，多跳推理 | [GraphRAG 文档](https://haolpku.github.io/DataMind-Doc/zh/) |
-| **Database** | 自然语言转 SQL，支持 SQL 文件自动导入 | [Database 文档](https://haolpku.github.io/DataMind-Doc/zh/) |
-| **Skills** | 工具型（Python 函数）+ 知识型（Markdown 检索） | [Skills 文档](https://haolpku.github.io/DataMind-Doc/zh/) |
-| **Memory** | FIFO 短期记忆 + LLM 摘要长期记忆 | [Memory 文档](https://haolpku.github.io/DataMind-Doc/zh/) |
-
----
-
-## 数据管理
-
-通过 `DATA_PROFILE` 环境变量管理多套知识库，数据和索引完全隔离：
+## 60-second demo
 
 ```bash
-DATA_PROFILE=default python main.py     # 默认 profile
-DATA_PROFILE=mydata python main.py      # 切换 profile
+git clone https://github.com/your-org/DataMind.git && cd DataMind
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+cp .env.datamind.example .env.datamind
+$EDITOR .env.datamind     # set DATAMIND__LLM__API_KEY at minimum
+
+# 1. Smoke-test the gateway (~2 s)
+python -m datamind.scripts.hello_sdk
+
+# 2. Seed a realistic enterprise dataset (17 docs / 64 graph nodes / 6 tables / 101 rows)
+python -m datamind.scripts.seed_enterprise_demo
+
+# 3. Watch the agent answer 8 cross-backend questions on its own
+DATAMIND__DATA__PROFILE=enterprise_demo \
+  python -m datamind.scripts.hello_enterprise
+
+# 4. Or just open the browser UI
+DATAMIND__DATA__PROFILE=enterprise_demo \
+  python -m uvicorn datamind.server:app --port 8000
+# → http://127.0.0.1:8000  — drag any .md / .csv / .txt into the dropzone, ask questions, watch tools fire
 ```
 
-数据放入对应目录即可：
-
-```
-data/profiles/{profile}/
-├── *.txt / *.md / *.pdf    → RAG 原始文档（自动分块）
-├── chunks/*.jsonl          → RAG 预分块（跳过分块）
-├── triplets/*.jsonl        → GraphRAG 三元组
-├── tables/*.sql            → Database SQL 文件
-└── images/                 → 多模态图片
-```
-
-详细的数据格式规范请参阅 [数据格式文档](https://haolpku.github.io/DataMind-Doc/zh/)。
+More detail in [`GETTING_STARTED.md`](./GETTING_STARTED.md).
 
 ---
 
-## 重建索引
+## What "agentic" actually means here
 
-**Web 界面**：RAG / GraphRAG 面板中点击"重建索引"按钮。
+Ask: **"工程部 Shanghai 的员工工资加起来是多少？"**
 
-**命令行**：
+The agent figures out it needs SQL, tries `db_query_nl`, gets an empty result, recovers by inspecting the schema (`db_list_tables` → `db_describe_table`), discovers the column is `Eng` not `Engineering`, rewrites the SQL itself, and answers ¥26,000 — without any of that being hard-coded. Same agent picks `graph_search_entities + graph_neighbors` for relationship questions, `kb_search + skill_get` for SOP questions, `memory_save` for "remember this for me" requests.
+
+**Frontend stays the same regardless.** The 27 tools, the streaming SSE protocol, and the chat UI work identically across two interchangeable agent backends:
+
+```
+DATAMIND__AGENT__BACKEND=native   # default — pure-Python anthropic SDK + self-written loop
+DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
+                                  # unlocks Hooks / Subagents / Compaction / Plan mode
+```
+
+Both verified end-to-end against the same 8 enterprise-demo questions ([numbers here](./GETTING_STARTED.md#10-bench)).
+
+---
+
+## Add data by talking
+
+The 4 ingest tools turn the agent into a **read-and-write** surface:
+
+```
+you  → "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
+agent → calls db_import_csv(path=..., table='q2_sales')   ✓ 18 rows inserted
+you  → "Q2 sales pipeline 里 in-pipeline 单子总额是多少？哪个 sales rep 单子最多？"
+agent → calls db_query_sql(...)                            ✓ answers from the freshly-imported table
+```
+
+Or drop the file into the browser dropzone and click **导入**. Or say "把这段加进图谱：陈诚晋升 Tech Lead，向 Ann 汇报" → agent calls `graph_add_triples_from_text`, LLM extracts triples, graph upserts them. No restart, no reindex.
+
+---
+
+## Why v0.2
+
+v0.1 was functional but coupled: a global `AppState`, hard-wired modules, vendor-locked to the `claude` CLI. v0.2 reshapes it around:
+
+- **Protocols + registries** — every capability is a `Protocol`; concrete classes register under a short name. New DB dialect / embedding provider / retriever strategy = one file.
+- **Pluggable agent loop** — `native` (anthropic SDK) or `sdk` (claude-agent-sdk + CCR), one ENV switch.
+- **Real SSE streaming** through FastAPI — not v0.1's fake character-sliced streaming.
+- **Zero global state** — every request owns its own `RequestContext` with a trace id.
+- **Side-by-side with v0.1** — old code paths untouched, easy comparison.
+
+See [Architecture](https://haolpku.github.io/DataMind-Doc/en/notes/guide/basicinfo/architecture/) for full detail.
+
+---
+
+## Repo layout
+
+```
+DataMind/
+├── datamind/                     # ── v0.2 (new code) ──────────────────
+│   ├── agent/                    # base.py + loop_native.py + loop_sdk.py
+│   ├── capabilities/             # kb / graph / db / skills / memory /
+│   │                             #   ingest / embedding
+│   ├── core/                     # Protocol, Registry, Config, Logging, Tools
+│   ├── scripts/                  # hello_*.py + seed_enterprise_demo.py
+│   ├── cli.py                    # `python -m datamind ...`
+│   ├── server.py                 # FastAPI + real SSE + /api/upload
+│   └── tests/                    # 95 passing tests (no network required)
+│
+├── .claude/skills/               # SDK-style knowledge skills (SKILL.md)
+├── static/app.html               # browser UI (drag-drop + tool cards + sidebar)
+├── scripts/start_ccr.sh          # one-line CCR launcher (for sdk backend)
+├── demo-uploads/                 # 6 sample files to drag-drop into the UI
+│
+├── modules/ core/ main.py server.py benchmark/   # ── v0.1 legacy ─
+│
+├── data/profiles/<profile>/      # per-profile raw inputs
+├── storage/<profile>/            # per-profile indexes & DBs
+├── pyproject.toml                # v0.2 install + CLI entry
+└── .env.datamind.example         # nested env template
+```
+
+---
+
+## Profiles
+
+One environment variable switches data + storage directories in lockstep:
 
 ```bash
-rm -rf storage/default/
-python main.py
+DATAMIND__DATA__PROFILE=customer_a python -m datamind chat
 ```
+
+Maps to `data/profiles/customer_a/` and `storage/customer_a/`.
 
 ---
 
-## Benchmark
-
-内置并发推理测评，支持准确率评估：
+## Tests
 
 ```bash
-python -m benchmark.run --questions data/bench/2wiki.jsonl --concurrency 50
-python -m benchmark.evaluate benchmark_results.json
+pytest datamind/tests/
+# 95 passed in ~0.6s — no network required
 ```
 
-详见 [Benchmark 文档](https://haolpku.github.io/DataMind-Doc/zh/)。
+Plus live smoke + benchmark scripts:
+`hello_sdk`, `hello_kb`, `hello_db`, `hello_graph`, `hello_skills`, `hello_memory`, `hello_agent`,
+`seed_enterprise_demo`, `hello_enterprise` (8 cross-backend questions).
 
 ---
 
-## 技术栈
+## Full documentation
 
-| 组件 | 技术 | 说明 |
-|------|------|------|
-| 框架 | LlamaIndex | 核心编排 |
-| LLM | OpenAI 兼容 API | 不需要 GPU |
-| 向量数据库 | Chroma | 本地, 纯 Python |
-| 知识图谱 | NetworkX | 本地, 纯 Python |
-| 关系数据库 | SQLite | 零配置 |
-| Agent | FunctionAgent | 自动工具选择 |
-| Web 后端 | FastAPI | 异步, SSE 流式输出 |
-| Web 前端 | 纯 HTML/CSS/JS | 无需 npm |
+See **[DataMind-Doc](https://haolpku.github.io/DataMind-Doc/en/)** for architecture, configuration reference, per-capability deep dives, and tutorials in English and Chinese.
