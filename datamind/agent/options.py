@@ -64,7 +64,6 @@ async def build_agent(
     settings: Settings,
     *,
     enable: set[str] | None = None,
-    default_memory_namespace: str = "session:default",
 ) -> DataMindAgent:
     """Assemble every capability + the agent loop.
 
@@ -103,9 +102,13 @@ async def build_agent(
         tools.extend(build_skills_tools(skills))
 
     # Memory
+    # MemoryService binds `default_profile = settings.data.profile`, so
+    # scope='profile' calls without an explicit profile target the active
+    # tenant. session_id is per-request — tools accept it explicitly until
+    # full RequestContext propagation lands in the hooks layer.
     memory = build_memory_service(settings, llm_client=client)
     if "memory" in active:
-        tools.extend(build_memory_tools(memory, default_namespace=default_memory_namespace))
+        tools.extend(build_memory_tools(memory))
 
     # Ingest — agent-driven additions to KB / DB / Graph. Built last so it
     # can wire into already-constructed services. Tools are registered

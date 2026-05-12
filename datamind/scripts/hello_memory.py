@@ -58,7 +58,7 @@ async def _main() -> int:
     print(f"[hello_memory] profile = {settings.data.profile}")
 
     tools = ToolRegistry()
-    tools.extend(build_memory_tools(memory, default_namespace="session:demo"))
+    tools.extend(build_memory_tools(memory))
     print(f"[hello_memory] tools   = {tools.names()}")
 
     # --- Short-term (per-session) ---
@@ -70,7 +70,7 @@ async def _main() -> int:
     for t in recent:
         print(f"  [{t['role']}] {t['content'][:60]}")
 
-    # --- Long-term (explicit saves) ---
+    # --- Long-term (explicit saves, scope='profile' is the default) ---
     print("\n[hello_memory] memory_save (explicit facts):")
     for fact in [
         "The user's name is Ann.",
@@ -92,25 +92,26 @@ async def _main() -> int:
         for h in out["results"]:
             print(f"  score={h['score']:.3f}  {h['content']}")
 
-    # --- Fact extraction via the live LLM ---
+    # --- Fact extraction via the live LLM, written to scope='session' ---
     extracted = await memory.extract_and_save(
-        "session:demo",
         user_turn="I'm moving to Shenzhen next month and will start jogging in the morning.",
         assistant_turn="Nice — Shenzhen in April is great for outdoor runs.",
+        scope="session",
+        session_id="demo",
     )
     print(f"\n[hello_memory] extracted {len(extracted)} fact(s) from a turn:")
     for f in extracted:
         print(f"  - {f}")
 
-    # --- Confirm they're recallable ---
-    post = await memory.recall("session:demo", "where is the user moving", top_k=3)
+    # --- Confirm they're recallable (session-scoped recall) ---
+    post = await memory.recall("where is the user moving", session_id="demo", top_k=3)
     print("\n[hello_memory] recall 'where is the user moving':")
     for h in post:
         print(f"  score={h['score']:.3f}  {h['content']}")
 
-    # --- Namespaces ---
-    ns = await tools.get("memory_list_namespaces").handler()
-    print(f"\n[hello_memory] namespaces = {ns['namespaces']}")
+    # --- Profiles seen by the store ---
+    ns = await tools.get("memory_list_profiles").handler()
+    print(f"\n[hello_memory] profiles = {ns['profiles']}")
 
     print("\n[hello_memory] OK")
     return 0

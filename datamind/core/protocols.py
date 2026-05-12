@@ -10,7 +10,7 @@ in provider-specific config, not in the protocol.
 """
 from __future__ import annotations
 
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, Literal, Protocol, Sequence, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -84,12 +84,31 @@ class QueryResult(BaseModel):
 
 
 class MemoryItem(BaseModel):
+    """A single long-term memory entry.
+
+    `scope` (global / profile / session) is the v0.3 multi-tenant boundary.
+    `kind` is a typed tag agent/UI can filter on.
+    `status` distinguishes active vs archived (soft-deleted) without losing
+    the audit trail.
+
+    `namespace` is retained for v0.2 backward compatibility — providers
+    that haven't migrated still surface it; v0.3 callers should rely on
+    (scope, profile, session_id) instead.
+    """
+
     id: str
-    namespace: str
+    scope: Literal["global", "profile", "session"] = "profile"
+    profile: str | None = None
+    session_id: str | None = None
+    kind: Literal["preference", "decision", "workflow", "summary", "skill", "fact"] = "fact"
+    status: Literal["active", "archived"] = "active"
     content: str
     score: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
+
+    # ---- v0.2 compat shim ------------------------------------------------
+    namespace: str | None = None  # populated by providers that still use it
 
 
 # ---------------------------------------------------------------------------
@@ -231,30 +250,51 @@ class DatabaseDialect(Protocol):
 
 @runtime_checkable
 class MemoryStore(Protocol):
-    """Long-term memory storage (SQLite+embedding / Redis / Postgres / ...).
+    """Long-term memory storage with three-scope partitioning (v0.3).
 
-    `namespace` typically encodes session_id or user_id so the agent can
-    scope recall. Providers are free to implement embedding-based search
-    or lexical search — the contract only requires `recall(query) -> ranked
-    list`.
+    Items live in one of three scopes:
+      * ``global``  — applies to every tenant and session
+                      ("respond in Chinese", "always cite sources")
+      * ``profile`` — bound to a tenant/project
+                      (per-customer terminology, project conventions)
+      * ``session`` — confined to one conversation thread
+
+    Recall is the union of scope-conditioned top-k retrievals, so callers
+    that don't care about scoping can still pass `profile=None,
+    session_id=None` and get only the global slice.
+
+    Providers may use embeddings, BM25, or any other ranking — the contract
+    only requires `recall` returns a ranked list and respects the scope
+    filter. ``status`` defaults to ``active`` and supports soft-delete via
+    ``forget``.
     """
 
     async def save(
         self,
-        namespace: str,
         content: str,
         *,
+        scope: Literal["global", "profile", "session"] = "profile",
+        profile: str | None = None,
+        session_id: str | None = None,
+        kind: Literal["preference", "decision", "workflow", "summary", "skill", "fact"] = "fact",
         metadata: dict[str, Any] | None = None,
     ) -> str: ...
 
     async def recall(
         self,
-        namespace: str,
         query: str,
         *,
-        top_k: int = 5,
+        profile: str | None = None,
+        session_id: str | None = None,
+        top_k: int = 8,
+        kinds: Sequence[str] | None = None,
+        include_archived: bool = False,
     ) -> list[MemoryItem]: ...
 
-    async def forget(self, namespace: str, item_id: str) -> bool: ...
+    async def forget(self, item_id: str, *, hard: bool = False) -> bool:
+        """Soft-delete by default (status=archived). `hard=True` deletes the row."""
+        ...
 
-    async def list_namespaces(self) -> list[str]: ...
+    async def list_profiles(self) -> list[str]:
+        """List every profile that currently has at least one active item."""
+        ...

@@ -72,11 +72,14 @@ class _MockDB:
 
 
 class _MockMemory:
-    async def save(self, namespace, content, *, metadata=None): return "id1"
-    async def recall(self, namespace, query, *, top_k=5):
-        return [MemoryItem(id="id1", namespace=namespace, content="x")]
-    async def forget(self, namespace, item_id): return True
-    async def list_namespaces(self): return ["default"]
+    async def save(self, content, *, scope="profile", profile=None, session_id=None,
+                   kind="fact", metadata=None):
+        return "id1"
+    async def recall(self, query, *, profile=None, session_id=None, top_k=8,
+                     kinds=None, include_archived=False):
+        return [MemoryItem(id="id1", scope="profile", profile=profile, content="x")]
+    async def forget(self, item_id, *, hard=False): return True
+    async def list_profiles(self): return ["default"]
 
 
 # ---------------------------------------------------------------------------

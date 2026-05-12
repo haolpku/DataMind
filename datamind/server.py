@@ -215,10 +215,16 @@ async def memory_peek(
     top_k: int = 10,
     st: AppState = Depends(_state),
 ) -> dict:
+    """Inspect long-term memory.
+
+    The path component is treated as a profile name (v0.3 scope='profile').
+    For session-scoped peeks pass session_id explicitly via a query param if
+    that becomes useful — the UI today only browses by tenant.
+    """
     if not query:
         query = " "  # any string — recall ranks every row lexically if no embedding
-    results = await st.agent.memory.recall(namespace, query, top_k=top_k)
-    return {"namespace": namespace, "query": query, "results": results}
+    results = await st.agent.memory.recall(query, profile=namespace, top_k=top_k)
+    return {"profile": namespace, "query": query, "results": results}
 
 
 @app.get("/api/graph/stats")

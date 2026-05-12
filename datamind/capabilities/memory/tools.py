@@ -1,49 +1,119 @@
-"""Memory tools exposed to the agent."""
+"""Memory tools exposed to the agent (v0.3 scope-typed).
+
+Tools accept an optional `scope` ∈ {global, profile, session}. The active
+profile and session_id come from `RequestContext` (injected by the agent
+loop) so the agent rarely needs to specify them explicitly.
+
+Backward compatibility: callers that don't pass `scope` get scope='profile'
+(the most common case for v0.2 namespace='profile:...' style usage), with
+`profile` taken from RequestContext via the closure built in `build_memory_tools`.
+"""
 from __future__ import annotations
 
 from typing import Any
 
+from datamind.core.context import RequestContext
 from datamind.core.tools import ToolSpec, tool_provider_registry
 
 from .service import MemoryService
 
 
-def build_memory_tools(memory: MemoryService, *, default_namespace: str | None = None) -> list[ToolSpec]:
-    """Build memory tools; `default_namespace` is injected when the caller omits one."""
-    fallback_ns = default_namespace or "global"
+def build_memory_tools(
+    memory: MemoryService,
+    *,
+    request_context: RequestContext | None = None,
+) -> list[ToolSpec]:
+    """Build memory tools bound to the given request context.
 
-    async def _save(content: str, namespace: str | None = None, metadata: dict | None = None) -> dict:
-        ns = namespace or fallback_ns
-        item_id = await memory.save(ns, content, metadata=metadata)
-        return {"namespace": ns, "id": item_id}
+    The agent loop creates one ``MemoryService`` (long-lived) and
+    re-builds tools per request with a fresh ``RequestContext`` so that
+    `profile` / `session_id` stay accurate across concurrent requests.
+    """
 
-    async def _recall(query: str, namespace: str | None = None, top_k: int = 5) -> dict:
-        ns = namespace or fallback_ns
-        hits = await memory.recall(ns, query, top_k=top_k)
-        return {"namespace": ns, "query": query, "count": len(hits), "results": hits}
+    def _ctx() -> tuple[str | None, str | None]:
+        if request_context is None:
+            return (None, None)
+        return (request_context.profile, request_context.session_id)
 
-    async def _forget(item_id: str, namespace: str | None = None) -> dict:
-        ns = namespace or fallback_ns
-        ok = await memory.forget(ns, item_id)
-        return {"namespace": ns, "id": item_id, "deleted": ok}
+    async def _save(
+        content: str,
+        scope: str = "profile",
+        kind: str = "fact",
+        profile: str | None = None,
+        session_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        ctx_profile, ctx_session = _ctx()
+        item_id = await memory.save(
+            content,
+            scope=scope,  # type: ignore[arg-type]
+            profile=profile or ctx_profile,
+            session_id=session_id or ctx_session,
+            kind=kind,  # type: ignore[arg-type]
+            metadata=metadata,
+        )
+        return {"id": item_id, "scope": scope, "kind": kind}
 
-    async def _list() -> dict:
-        return {"namespaces": await memory.list_namespaces()}
+    async def _recall(
+        query: str,
+        top_k: int = 8,
+        scope_filter: list[str] | None = None,
+        kinds: list[str] | None = None,
+        profile: str | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        ctx_profile, ctx_session = _ctx()
+        # `scope_filter` lets callers limit to e.g. ["global","profile"];
+        # absent ⇒ all three scopes are merged.
+        eff_profile = profile if profile is not None else ctx_profile
+        eff_session = session_id if session_id is not None else ctx_session
+        if scope_filter:
+            if "session" not in scope_filter:
+                eff_session = None
+            if "profile" not in scope_filter:
+                eff_profile = None
+        hits = await memory.recall(
+            query,
+            profile=eff_profile,
+            session_id=eff_session,
+            top_k=top_k,
+            kinds=kinds,
+        )
+        return {"query": query, "count": len(hits), "results": hits}
+
+    async def _forget(item_id: str, hard: bool = False) -> dict:
+        ok = await memory.forget(item_id, hard=hard)
+        return {"id": item_id, "deleted": ok, "hard": hard}
+
+    async def _list_profiles() -> dict:
+        return {"profiles": await memory.list_profiles()}
 
     return [
         ToolSpec(
             name="memory_save",
             description=(
-                "Persist a durable fact to long-term memory. "
-                "Use for user preferences, decisions, domain facts the user confirms. "
-                "The optional namespace lets you scope the fact to a session ('session:...') "
-                "or a user ('user:...'); default is the active session."
+                "Persist a durable fact/preference/decision to long-term memory. "
+                "Choose scope: 'global' for system-wide preferences, 'profile' for "
+                "tenant-scoped facts (default), 'session' for ephemeral context. "
+                "The current profile and session are auto-injected — pass them "
+                "explicitly only when you need to cross boundaries on purpose."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "The fact to remember."},
-                    "namespace": {"type": "string", "description": "Optional explicit namespace."},
+                    "content": {"type": "string", "description": "What to remember."},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "profile", "session"],
+                        "default": "profile",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["preference", "decision", "workflow", "summary", "skill", "fact"],
+                        "default": "fact",
+                    },
+                    "profile": {"type": "string", "description": "Override the active profile."},
+                    "session_id": {"type": "string", "description": "Override the active session."},
                     "metadata": {"type": "object", "additionalProperties": True},
                 },
                 "required": ["content"],
@@ -54,15 +124,28 @@ def build_memory_tools(memory: MemoryService, *, default_namespace: str | None =
         ToolSpec(
             name="memory_recall",
             description=(
-                "Look up relevant facts from long-term memory by semantic similarity. "
-                "Call this when the user asks about something they've told you before or when prior context would help."
+                "Look up relevant memories by semantic similarity, automatically "
+                "merging session-, profile-, and global-scope items. Use this when "
+                "the user references prior context or stable preferences. "
+                "Optional `scope_filter` restricts which scopes contribute (e.g. "
+                "['profile','global'] to ignore session memories)."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "namespace": {"type": "string"},
-                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                    "scope_filter": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["global", "profile", "session"]},
+                    },
+                    "kinds": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional kind filter (preference/decision/workflow/...).",
+                    },
+                    "profile": {"type": "string"},
+                    "session_id": {"type": "string"},
                 },
                 "required": ["query"],
             },
@@ -71,12 +154,16 @@ def build_memory_tools(memory: MemoryService, *, default_namespace: str | None =
         ),
         ToolSpec(
             name="memory_forget",
-            description="Delete a specific memory item by id. Obtain the id from memory_recall first.",
+            description=(
+                "Soft-delete a memory item by id (it becomes status='archived' "
+                "and stops appearing in recall). Pass `hard=true` to remove the "
+                "row outright. Obtain ids from memory_recall first."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "item_id": {"type": "string"},
-                    "namespace": {"type": "string"},
+                    "hard": {"type": "boolean", "default": False},
                 },
                 "required": ["item_id"],
             },
@@ -84,10 +171,10 @@ def build_memory_tools(memory: MemoryService, *, default_namespace: str | None =
             metadata={"group": "memory", "destructive": True},
         ),
         ToolSpec(
-            name="memory_list_namespaces",
-            description="List every namespace that currently has stored memories.",
+            name="memory_list_profiles",
+            description="List every profile (tenant) that currently has stored memories.",
             input_schema={"type": "object", "properties": {}},
-            handler=_list,
+            handler=_list_profiles,
             metadata={"group": "memory"},
         ),
     ]
@@ -99,8 +186,8 @@ class _MemoryToolProvider:
         m = services.get("memory_service")
         if m is None:
             raise ValueError("memory tool provider requires 'memory_service'")
-        ns = services.get("default_namespace")
-        return build_memory_tools(m, default_namespace=ns)
+        ctx = services.get("request_context")
+        return build_memory_tools(m, request_context=ctx)
 
 
 __all__ = ["build_memory_tools"]

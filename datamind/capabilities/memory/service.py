@@ -1,19 +1,19 @@
 """MemoryService — unifies short-term + long-term under one API.
 
 Short-term (in-memory rolling window) is cheap and always-on.
-Long-term (MemoryStore) uses whichever backend is configured (sqlite,
-future: redis/postgres). An optional EmbeddingProvider powers semantic
-recall; without it, recall falls back to lexical matching.
+Long-term (MemoryStore, v0.3) uses scope-typed storage:
+  - global  : applies everywhere ("respond in Chinese")
+  - profile : tenant/project boundary
+  - session : single conversation
 
-Namespace convention:
-    "session:<session_id>"   — scoped to one conversation
-    "user:<user_id>"         — cross-session but per-user
-    "global"                 — system-wide knowledge
+Recall takes (profile, session_id) and returns the union of three
+scope-conditioned top-k retrievals. This is the v0.3 multi-tenant
+isolation primitive — see `core/protocols.py::MemoryStore`.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Sequence
 
 from anthropic import AsyncAnthropic
 
@@ -30,18 +30,30 @@ from .short_term import ShortTermMemory, Turn
 
 _log = get_logger("memory.service")
 
+Scope = Literal["global", "profile", "session"]
+Kind = Literal["preference", "decision", "workflow", "summary", "skill", "fact"]
+
 
 class MemoryService:
+    """Wraps short-term + long-term memory; long-term is scope-typed.
+
+    Most callers pass a `default_profile` (the active tenant) and optional
+    `default_session_id` once at construction; per-call `scope` / `profile`
+    / `session_id` overrides are still allowed.
+    """
+
     def __init__(
         self,
         *,
         short_term: ShortTermMemory,
         long_term: MemoryStore,
+        default_profile: str | None = None,
         llm_client: AsyncAnthropic | None = None,
         llm_model: str | None = None,
     ) -> None:
         self.short_term = short_term
         self.long_term = long_term
+        self._default_profile = default_profile
         self._llm = llm_client
         self._model = llm_model
 
@@ -57,39 +69,66 @@ class MemoryService:
 
     async def save(
         self,
-        namespace: str,
         content: str,
         *,
+        scope: Scope = "profile",
+        profile: str | None = None,
+        session_id: str | None = None,
+        kind: Kind = "fact",
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        return await self.long_term.save(namespace, content, metadata=metadata)
+        return await self.long_term.save(
+            content,
+            scope=scope,
+            profile=profile or (self._default_profile if scope == "profile" else None),
+            session_id=session_id,
+            kind=kind,
+            metadata=metadata,
+        )
 
     async def recall(
         self,
-        namespace: str,
         query: str,
         *,
-        top_k: int = 5,
+        profile: str | None = None,
+        session_id: str | None = None,
+        top_k: int = 8,
+        kinds: Sequence[str] | None = None,
+        include_archived: bool = False,
     ) -> list[dict[str, Any]]:
-        hits = await self.long_term.recall(namespace, query, top_k=top_k)
+        hits = await self.long_term.recall(
+            query,
+            profile=profile or self._default_profile,
+            session_id=session_id,
+            top_k=top_k,
+            kinds=kinds,
+            include_archived=include_archived,
+        )
         return [h.model_dump() for h in hits]
 
-    async def forget(self, namespace: str, item_id: str) -> bool:
-        return await self.long_term.forget(namespace, item_id)
+    async def forget(self, item_id: str, *, hard: bool = False) -> bool:
+        return await self.long_term.forget(item_id, hard=hard)
 
-    async def list_namespaces(self) -> list[str]:
-        return await self.long_term.list_namespaces()
+    async def list_profiles(self) -> list[str]:
+        return await self.long_term.list_profiles()
 
     # -------------------------------------------------------- fact extraction
 
     async def extract_and_save(
         self,
-        namespace: str,
         *,
         user_turn: str,
         assistant_turn: str,
+        scope: Scope = "session",
+        profile: str | None = None,
+        session_id: str | None = None,
     ) -> list[str]:
-        """Call the fallback LLM to pull facts from the turn, persist them."""
+        """Pull facts from a turn pair using the fallback LLM, persist them.
+
+        Defaults to scope='session' because per-turn extractions are most
+        valuable bounded to the current conversation; callers that want
+        cross-session retention should pass scope='profile' or 'global'.
+        """
         if not self._llm or not self._model:
             return []
         facts = await extract_facts(
@@ -99,7 +138,14 @@ class MemoryService:
             assistant_turn=assistant_turn,
         )
         for f in facts:
-            await self.save(namespace, f, metadata={"_source": "auto_extracted"})
+            await self.save(
+                f,
+                scope=scope,
+                profile=profile,
+                session_id=session_id,
+                kind="fact",
+                metadata={"_source": "auto_extracted"},
+            )
         return facts
 
 
@@ -141,6 +187,7 @@ def build_memory_service(
     return MemoryService(
         short_term=st,
         long_term=long_term,
+        default_profile=settings.data.profile,
         llm_client=llm_client,
         llm_model=model,
     )

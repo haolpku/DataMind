@@ -1,19 +1,36 @@
-"""SQLite-backed long-term memory with embedding recall.
+"""SQLite-backed long-term memory with scope-typed recall (v0.3).
 
-Schema:
-    CREATE TABLE memory (
-        id         TEXT PRIMARY KEY,
-        namespace  TEXT NOT NULL,
-        content    TEXT NOT NULL,
-        metadata   TEXT,  -- JSON
-        embedding  BLOB,  -- float32 packed
-        created_at REAL NOT NULL
+Schema (v0.3):
+    CREATE TABLE memory_v2 (
+        id          TEXT PRIMARY KEY,
+        scope       TEXT NOT NULL CHECK(scope IN ('global','profile','session')),
+        profile     TEXT,
+        session_id  TEXT,
+        kind        TEXT NOT NULL DEFAULT 'fact',
+        status      TEXT NOT NULL DEFAULT 'active',
+        content     TEXT NOT NULL,
+        metadata    TEXT,                       -- JSON
+        embedding   BLOB,                       -- float32 packed
+        created_at  REAL NOT NULL,
+        updated_at  REAL NOT NULL,
+        archived_at REAL                        -- NULL unless soft-deleted
     );
-    CREATE INDEX IF NOT EXISTS idx_memory_ns ON memory(namespace);
+    CREATE INDEX idx_mem2_scope_profile  ON memory_v2(scope, profile)         WHERE status='active';
+    CREATE INDEX idx_mem2_scope_session  ON memory_v2(scope, session_id)      WHERE status='active';
+    CREATE INDEX idx_mem2_scope_global   ON memory_v2(scope)                  WHERE status='active' AND scope='global';
 
-Recall uses cosine similarity computed in Python. For corpora up to tens
-of thousands of items this is fine; once you outgrow it, drop in a Redis
-/ Postgres+pgvector / Qdrant provider under memory_registry.
+Recall is the union of three scope-conditioned top-k retrievals (session,
+profile, global), with caller-controlled per-scope budgets. The default
+distribution (2 + 4 + 2) gives a balanced 8-item context that fits inside
+typical LLM prompt budgets without bleeding tenant boundaries.
+
+Migration: if the legacy v0.2 ``memory`` table exists, rows are copied
+into ``memory_v2`` with ``scope='profile', profile=<old_namespace>`` so
+existing deployments don't lose data on upgrade.
+
+Recall uses cosine similarity in Python; for tens of thousands of items
+this is fine. Outgrow it ⇒ register a Postgres+pgvector or Qdrant
+provider under ``memory_registry``.
 """
 from __future__ import annotations
 
@@ -25,7 +42,7 @@ import struct
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Literal, Sequence
 
 from datamind.core.errors import CapabilityError
 from datamind.core.logging import get_logger
@@ -33,6 +50,12 @@ from datamind.core.protocols import EmbeddingProvider, MemoryItem
 from datamind.core.registry import memory_registry
 
 _log = get_logger("memory.sqlite")
+
+Scope = Literal["global", "profile", "session"]
+Kind = Literal["preference", "decision", "workflow", "summary", "skill", "fact"]
+
+
+# ----------------------------------------------------------------- helpers
 
 
 def _pack(vec: list[float]) -> bytes:
@@ -55,9 +78,32 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def _row_to_item(row: tuple, *, score: float = 0.0) -> MemoryItem:
+    rid, scope, profile, session_id, kind, status, content, meta_json, _emb, created_at, _updated, _archived = row
+    try:
+        meta = json.loads(meta_json) if meta_json else {}
+    except json.JSONDecodeError:
+        meta = {}
+    return MemoryItem(
+        id=rid,
+        scope=scope,
+        profile=profile,
+        session_id=session_id,
+        kind=kind,
+        status=status,
+        content=content,
+        score=score,
+        metadata=meta,
+        created_at=str(created_at),
+    )
+
+
+# ----------------------------------------------------------------- store
+
+
 @memory_registry.register("sqlite")
 class SQLiteMemoryStore:
-    """Embedding-aware memory store in a single local SQLite file."""
+    """Embedding-aware, scope-typed memory store in a single local SQLite file."""
 
     def __init__(
         self,
@@ -67,7 +113,6 @@ class SQLiteMemoryStore:
         embedding: EmbeddingProvider | None = None,
     ) -> None:
         if dsn and not db_path:
-            # Accept an SQLAlchemy-style URL for symmetry with the DB capability.
             if dsn.startswith("sqlite:///"):
                 db_path = dsn[len("sqlite:///"):]
             else:
@@ -79,6 +124,8 @@ class SQLiteMemoryStore:
         self._embedding = embedding
         self._init_schema()
 
+    # ------------------------------------------------------------- schema
+
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path))
         conn.execute("PRAGMA journal_mode = WAL")
@@ -89,27 +136,113 @@ class SQLiteMemoryStore:
         with self._conn() as conn:
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS memory (
-                    id         TEXT PRIMARY KEY,
-                    namespace  TEXT NOT NULL,
-                    content    TEXT NOT NULL,
-                    metadata   TEXT,
-                    embedding  BLOB,
-                    created_at REAL NOT NULL
+                CREATE TABLE IF NOT EXISTS memory_v2 (
+                    id          TEXT PRIMARY KEY,
+                    scope       TEXT NOT NULL CHECK(scope IN ('global','profile','session')),
+                    profile     TEXT,
+                    session_id  TEXT,
+                    kind        TEXT NOT NULL DEFAULT 'fact',
+                    status      TEXT NOT NULL DEFAULT 'active',
+                    content     TEXT NOT NULL,
+                    metadata    TEXT,
+                    embedding   BLOB,
+                    created_at  REAL NOT NULL,
+                    updated_at  REAL NOT NULL,
+                    archived_at REAL
                 );
-                CREATE INDEX IF NOT EXISTS idx_memory_ns ON memory(namespace);
                 """
             )
+            # Partial indexes: cheap and selective for the active slice we
+            # always recall against.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mem2_scope_profile "
+                "ON memory_v2(scope, profile) WHERE status='active'"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mem2_scope_session "
+                "ON memory_v2(scope, session_id) WHERE status='active'"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mem2_scope_global "
+                "ON memory_v2(scope) WHERE status='active' AND scope='global'"
+            )
+            self._migrate_v1_if_needed(conn)
 
-    # ----------------------------------------------------------- async ops
+    def _migrate_v1_if_needed(self, conn: sqlite3.Connection) -> None:
+        """Copy rows from the legacy ``memory`` table into ``memory_v2``.
+
+        Old rows had a single ``namespace`` field; we map every legacy row to
+        ``scope='profile', profile=<namespace>``. This is conservative — it
+        keeps the data accessible without claiming false isolation properties.
+        """
+        # Does the old table exist?
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='memory'"
+        )
+        if cur.fetchone() is None:
+            return
+
+        # Anything to migrate?
+        cur = conn.execute("SELECT count(*) FROM memory")
+        old_count = int(cur.fetchone()[0])
+        if old_count == 0:
+            conn.execute("DROP TABLE memory")
+            return
+
+        cur = conn.execute("SELECT count(*) FROM memory_v2")
+        new_count = int(cur.fetchone()[0])
+        if new_count > 0:
+            # Already migrated; leave the old table for inspection.
+            return
+
+        _log.info("memory_v1_migration_start", extra={"rows": old_count})
+        cur = conn.execute(
+            "SELECT id, namespace, content, metadata, embedding, created_at FROM memory"
+        )
+        rows = cur.fetchall()
+        ts = time.time()
+        for rid, namespace, content, meta_json, emb, created_at in rows:
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_v2 ("
+                "id, scope, profile, session_id, kind, status, content, metadata, "
+                "embedding, created_at, updated_at, archived_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                (
+                    rid,
+                    "profile",
+                    namespace,
+                    None,
+                    "fact",
+                    "active",
+                    content,
+                    meta_json,
+                    emb,
+                    created_at,
+                    ts,
+                ),
+            )
+        _log.info("memory_v1_migration_done", extra={"rows": old_count})
+        # Drop the legacy table after a successful migration. Keep behavior
+        # predictable: we don't want lingering "ghost" data in two places.
+        conn.execute("DROP TABLE memory")
+
+    # ------------------------------------------------------------- save
 
     async def save(
         self,
-        namespace: str,
         content: str,
         *,
+        scope: Scope = "profile",
+        profile: str | None = None,
+        session_id: str | None = None,
+        kind: Kind = "fact",
         metadata: dict[str, Any] | None = None,
     ) -> str:
+        if scope == "profile" and not profile:
+            raise CapabilityError("memory", "scope='profile' requires profile= argument")
+        if scope == "session" and not session_id:
+            raise CapabilityError("memory", "scope='session' requires session_id= argument")
+
         item_id = uuid.uuid4().hex
         ts = time.time()
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
@@ -121,121 +254,242 @@ class SQLiteMemoryStore:
         def _run() -> None:
             with self._conn() as conn:
                 conn.execute(
-                    "INSERT INTO memory (id, namespace, content, metadata, embedding, created_at) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (item_id, namespace, content, meta_json, emb, ts),
+                    "INSERT INTO memory_v2 ("
+                    "id, scope, profile, session_id, kind, status, content, metadata, "
+                    "embedding, created_at, updated_at, archived_at"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                    (
+                        item_id,
+                        scope,
+                        profile if scope == "profile" else None,
+                        session_id if scope == "session" else None,
+                        kind,
+                        "active",
+                        content,
+                        meta_json,
+                        emb,
+                        ts,
+                        ts,
+                    ),
                 )
 
         await asyncio.to_thread(_run)
         return item_id
 
+    # ------------------------------------------------------------- recall
+
     async def recall(
         self,
-        namespace: str,
         query: str,
         *,
-        top_k: int = 5,
+        profile: str | None = None,
+        session_id: str | None = None,
+        top_k: int = 8,
+        kinds: Sequence[str] | None = None,
+        include_archived: bool = False,
+        # advanced — let callers tune the per-scope budget for ablation
+        per_scope: dict[str, int] | None = None,
     ) -> list[MemoryItem]:
-        # If no embedding is available, fall back to substring ranking.
-        if self._embedding is None:
-            return await self._lexical_recall(namespace, query, top_k=top_k)
-        qv = await self._embedding.embed_query(query)
+        # Default per-scope budget: 2 (session) + 4 (profile) + 2 (global) = 8.
+        budgets: dict[str, int] = {"session": 2, "profile": 4, "global": 2}
+        if per_scope:
+            budgets.update({k: v for k, v in per_scope.items() if k in budgets})
 
-        def _run() -> list[MemoryItem]:
-            with self._conn() as conn:
-                cur = conn.execute(
-                    "SELECT id, content, metadata, embedding, created_at "
-                    "FROM memory WHERE namespace = ?",
-                    (namespace,),
-                )
-                rows = cur.fetchall()
-            scored: list[tuple[float, MemoryItem]] = []
-            for rid, content, meta_json, emb_blob, created_at in rows:
-                score = _cosine(qv, _unpack(emb_blob)) if emb_blob else 0.0
-                try:
-                    meta = json.loads(meta_json) if meta_json else {}
-                except json.JSONDecodeError:
-                    meta = {}
-                scored.append((
-                    score,
-                    MemoryItem(
-                        id=rid,
-                        namespace=namespace,
-                        content=content,
-                        score=score,
-                        metadata=meta,
-                        created_at=str(created_at),
-                    ),
-                ))
-            scored.sort(key=lambda t: -t[0])
-            return [item for _, item in scored[:top_k]]
+        # If no embedding, fall back to lexical scoring within the same
+        # scope filters so the contract stays identical.
+        scoring = self._score_with_embedding if self._embedding else self._score_lexical
+        qv = await self._embedding.embed_query(query) if self._embedding else None
 
-        return await asyncio.to_thread(_run)
+        merged: list[MemoryItem] = []
+        seen: set[str] = set()
 
-    async def _lexical_recall(self, namespace: str, query: str, *, top_k: int) -> list[MemoryItem]:
-        q_terms = [t for t in query.lower().split() if t]
+        async def _slice(scope: Scope, where: str, params: list[Any], budget: int) -> list[MemoryItem]:
+            if budget <= 0:
+                return []
+            return await asyncio.to_thread(
+                self._select_and_score,
+                scope=scope,
+                where=where,
+                params=params,
+                budget=budget,
+                kinds=list(kinds) if kinds else None,
+                include_archived=include_archived,
+                qvec=qv,
+                lexical_query=query,
+                scoring=scoring,
+            )
 
-        def _run() -> list[MemoryItem]:
-            with self._conn() as conn:
-                cur = conn.execute(
-                    "SELECT id, content, metadata, created_at FROM memory WHERE namespace = ?",
-                    (namespace,),
-                )
-                rows = cur.fetchall()
-            scored: list[tuple[float, MemoryItem]] = []
-            for rid, content, meta_json, created_at in rows:
-                lc = content.lower()
-                hits = sum(1 for t in q_terms if t in lc)
-                score = hits / max(len(q_terms), 1)
-                try:
-                    meta = json.loads(meta_json) if meta_json else {}
-                except json.JSONDecodeError:
-                    meta = {}
-                scored.append((
-                    score,
-                    MemoryItem(
-                        id=rid,
-                        namespace=namespace,
-                        content=content,
-                        score=score,
-                        metadata=meta,
-                        created_at=str(created_at),
-                    ),
-                ))
-            scored.sort(key=lambda t: -t[0])
-            return [item for _, item in scored[:top_k]]
+        # session
+        if session_id and budgets["session"] > 0:
+            for item in await _slice(
+                "session",
+                "scope='session' AND session_id=?",
+                [session_id],
+                budgets["session"],
+            ):
+                if item.id not in seen:
+                    seen.add(item.id)
+                    merged.append(item)
 
-        return await asyncio.to_thread(_run)
+        # profile
+        if profile and budgets["profile"] > 0:
+            for item in await _slice(
+                "profile",
+                "scope='profile' AND profile=?",
+                [profile],
+                budgets["profile"],
+            ):
+                if item.id not in seen:
+                    seen.add(item.id)
+                    merged.append(item)
 
-    async def forget(self, namespace: str, item_id: str) -> bool:
+        # global
+        if budgets["global"] > 0:
+            for item in await _slice(
+                "global",
+                "scope='global'",
+                [],
+                budgets["global"],
+            ):
+                if item.id not in seen:
+                    seen.add(item.id)
+                    merged.append(item)
+
+        # Final rank: by score desc, but keep stable scope ordering for ties
+        # so session-level prefs still win over global on equal-score items.
+        merged.sort(key=lambda m: (-m.score, _scope_priority(m.scope)))
+        return merged[:top_k]
+
+    # ------------------------------------------------------------- forget
+
+    async def forget(self, item_id: str, *, hard: bool = False) -> bool:
+        ts = time.time()
+
         def _run() -> bool:
             with self._conn() as conn:
-                cur = conn.execute(
-                    "DELETE FROM memory WHERE namespace = ? AND id = ?",
-                    (namespace, item_id),
-                )
+                if hard:
+                    cur = conn.execute("DELETE FROM memory_v2 WHERE id=?", (item_id,))
+                else:
+                    cur = conn.execute(
+                        "UPDATE memory_v2 SET status='archived', archived_at=?, updated_at=? "
+                        "WHERE id=? AND status='active'",
+                        (ts, ts, item_id),
+                    )
                 return cur.rowcount > 0
 
         return await asyncio.to_thread(_run)
 
-    async def list_namespaces(self) -> list[str]:
+    # ------------------------------------------------------------- listing
+
+    async def list_profiles(self) -> list[str]:
         def _run() -> list[str]:
             with self._conn() as conn:
-                cur = conn.execute("SELECT DISTINCT namespace FROM memory ORDER BY namespace")
-                return [r[0] for r in cur.fetchall()]
+                cur = conn.execute(
+                    "SELECT DISTINCT profile FROM memory_v2 "
+                    "WHERE scope='profile' AND status='active' "
+                    "ORDER BY profile"
+                )
+                return [r[0] for r in cur.fetchall() if r[0] is not None]
 
         return await asyncio.to_thread(_run)
 
-    async def count(self, namespace: str | None = None) -> int:
+    async def count(
+        self,
+        *,
+        scope: Scope | None = None,
+        profile: str | None = None,
+        session_id: str | None = None,
+        include_archived: bool = False,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if not include_archived:
+            clauses.append("status='active'")
+        if scope:
+            clauses.append("scope=?")
+            params.append(scope)
+        if profile:
+            clauses.append("profile=?")
+            params.append(profile)
+        if session_id:
+            clauses.append("session_id=?")
+            params.append(session_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
         def _run() -> int:
             with self._conn() as conn:
-                if namespace is None:
-                    return int(conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0])
-                return int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM memory WHERE namespace = ?",
-                        (namespace,),
-                    ).fetchone()[0]
-                )
+                cur = conn.execute(f"SELECT COUNT(*) FROM memory_v2{where}", params)
+                return int(cur.fetchone()[0])
 
         return await asyncio.to_thread(_run)
+
+    # ----------------------------------------------------------- internals
+
+    def _select_and_score(
+        self,
+        *,
+        scope: Scope,
+        where: str,
+        params: list[Any],
+        budget: int,
+        kinds: list[str] | None,
+        include_archived: bool,
+        qvec: list[float] | None,
+        lexical_query: str,
+        scoring,
+    ) -> list[MemoryItem]:
+        clauses = [where]
+        bind: list[Any] = list(params)
+        if not include_archived:
+            clauses.append("status='active'")
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            clauses.append(f"kind IN ({placeholders})")
+            bind.extend(kinds)
+        sql = (
+            "SELECT id, scope, profile, session_id, kind, status, content, metadata, "
+            "embedding, created_at, updated_at, archived_at "
+            "FROM memory_v2 WHERE " + " AND ".join(clauses)
+        )
+        with self._conn() as conn:
+            rows = conn.execute(sql, bind).fetchall()
+        if not rows:
+            return []
+        scored = scoring(rows, qvec=qvec, lexical_query=lexical_query)
+        scored.sort(key=lambda pair: -pair[0])
+        return [item for _, item in scored[:budget]]
+
+    @staticmethod
+    def _score_with_embedding(
+        rows: Iterable[tuple],
+        *,
+        qvec: list[float] | None,
+        lexical_query: str,  # unused
+    ) -> list[tuple[float, MemoryItem]]:
+        out: list[tuple[float, MemoryItem]] = []
+        for row in rows:
+            emb_blob = row[8]
+            score = _cosine(qvec, _unpack(emb_blob)) if (qvec and emb_blob) else 0.0
+            out.append((score, _row_to_item(row, score=score)))
+        return out
+
+    @staticmethod
+    def _score_lexical(
+        rows: Iterable[tuple],
+        *,
+        qvec: list[float] | None,  # unused
+        lexical_query: str,
+    ) -> list[tuple[float, MemoryItem]]:
+        terms = [t for t in lexical_query.lower().split() if t]
+        out: list[tuple[float, MemoryItem]] = []
+        for row in rows:
+            content = row[6]
+            lc = content.lower()
+            hits = sum(1 for t in terms if t in lc)
+            score = hits / max(len(terms), 1)
+            out.append((score, _row_to_item(row, score=score)))
+        return out
+
+
+def _scope_priority(scope: str) -> int:
+    return {"session": 0, "profile": 1, "global": 2}.get(scope, 9)
