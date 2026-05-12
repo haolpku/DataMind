@@ -159,7 +159,7 @@ Commands: `/new` resets history, `/exit` or `Ctrl-D` leaves. Tool calls print as
 python -m datamind ask "如何做代码审查？" --show-tools
 ```
 
-Uses the **current profile's** knowledge surfaces. Add `--session some-id` to scope long-term memory.
+Uses the **current profile's** knowledge surfaces. Memory is now **scope-typed** (v0.3): facts saved without an explicit scope land under `scope='profile'`, isolated to the active tenant. Pass `--session some-id` plus `scope='session'` in `memory_save` to confine items to a single conversation. `scope='global'` items are visible across every profile.
 
 ---
 
